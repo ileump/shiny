@@ -1,0 +1,186 @@
+---
+title: "Release notes"
+output: html_document
+runtime: shiny
+---
+
+### 1.2019.1005.1600
+
+(1) Auto-generate conclusion. 
+(2) Choose type of hypothesis test based on sample size
+
+### 1.2019.0929.1500
+
+(1) Remove columns in scaled data in OPLS-DA
+(2) Sanitize file name given group names which contain invalid characters for file names
+(3) Change default expand parameter from 0.05 to 0.15 in volcano plot
+(4) Change default N to 10 in plots of differential metabolites
+(4) Show message if names in data.csv and var.csv are inconsistent
+
+### 1.2019.0909.1500
+
+- dynamically determine heatmap and heatmap subplot size
+- add metabolite statistics
+- add heatmap alternative
+- fix font width unknown problem in windows
+- fix multcompView::mulcompLetters error when P value is NaN (Games-Howewll test when #group > 2 and some groups are all 0's)
+
+### 1.2019.0816.1200
+
+- Add component for heatmap subplot
+- Add barplot of group average by class
+
+### 1.2019.0814.0900
+
+- Reduce RData size by dynamically generating boxplot and barplot while saving to file
+- Fix labels in volcano plot when FC!=1
+
+### 1.2019.0813.1200
+
+- Check for NA value in d0
+- 
+
+### 1.2019.0812.1500
+
+- Add metabolites abundance by class
+- Save boxplot/barplot as in the report as pdf and png/tiff images
+
+### 1.2019.0808.0900
+
+- Add metabolites statistics
+- Create individual directory for each analysis
+- Add vertical dashed line corresponding to FC cut-off (if not equal to 1)
+- Support grid layout of boxplot
+- Support grid layout of barplot
+
+### 1.2019.0729.1300
+
+- Reverse group order in Hypotheis_test table names.
+- Correct typo in "non parametric test" in hypothesis test table.
+
+### 1.2019.0709.1000
+
+- Fix bug in applying group order.
+
+### 1.2019.0702.1600
+
+- Allow adjusting font size in heatmap.
+- Allow adjusting expand factor (distance between data and axes) in volcano plot.
+
+### 1.2019.0701.1700
+
+- Fix saving a single volcano plot when there are multiple. 
+- Allow selecting a subset of groups for analysis. 
+- Allow adjusting force to repel volcano plot text labels.
+
+### 1.2019.0624.1400
+
+- Show message when some groups have less than 3 observations.
+
+### 1.2019.0619.1300
+
+- Add label and mean.point option for PCA individual plot.
+
+### 1.2019.0617.1000
+
+- Change default fold change cut-off to 1 and modify legend accordingly.
+- Fix volcano plot text labels.
+
+### 1.2019.0606.1000
+
+- Export figures in png format, except for boxplot and barplot.
+
+### 1.2019.0605.1100
+
+- Remove NA in volcano plot
+
+### 1.2019.0604.1100
+
+- Support choice of raster image resolution: 100 dpi and 300 dpi 
+
+### 1.2019.0603.1500
+
+- Support choice of fonts for figures.
+- Check input data for invalid and duplicated names.
+
+### 1.2019.0417.2300
+
+- Provide multiple choices of global ggplot theme.
+- Export PCA_eig.csv, PCA_contrib.csv, PCA_ind.csv.
+- Add manual.
+- Add unit.
+- Expand y axis in PCA scree plot.
+- Fix barplot significance label height.
+
+### 1.2019.0215.1300
+
+- Allow generation of report without loading var.csv.
+
+### 1.2019.0215.0900
+
+- Only generate boxplot and barplot that will be shown to reduce response time.
+
+### 1.20190130.0944
+
+- Display no unit in barplot and boxplot when unit is not selected.
+
+### 1.20190109.1842
+
+- Allow setting confidence level for error bar in barplot
+- Allow setting P value adjustment method for parametric/non-parametric posthoc analysis.
+
+### 1.20190108.1445
+
+- Add unit to y-axis label in boxplot and barplot.
+- Fix paired test.
+
+### 1.20190107.1521
+
+- Replace Kruskal-Wallis by Wilcox test when there are 2 groups, because their results are slightly different.
+
+### 1.20180926.1600
+
+- Input group order from a column in sample annotation file.
+
+### 1.20180917.2000
+
+- Print OPLSDA sensitivity and specificity.
+- Add controls to export each figure to pdf.
+
+### 1.20180905.1700
+
+- Reduce .RData file size by discarding boxplot and barplot ggplot objects and producing them during report generation.
+- Set default number of labels to shown in volcano plot to 20.
+
+
+### 1.20180903.2328
+
+- Add control for max number of labels in volcano plot.
+
+### 1.20180903.1122
+
+- Dynamically change figure width and height for OPLS-DA.
+
+### 1.20180829
+
+2018-08-29
+
+- Fix wrong string match when base level name matches to more than one groups.
+- Move fig caption from chunk parameters to text. Fig.cap will not show when multiple plots are produced.
+- Add controls for x axis text in boxplot and barplot.
+
+### 1.20180828
+
+2018-08-28
+
+- Determine orthoI by CV in oplsda. 
+- Scale data before opls-da to avoid removal of low-variance variables.
+
+### 1.20180817
+
+2018-08-17
+
+- Reduce report generation time by saving only shown boxplot and barplot to RData.
+- Add version number in report. 
+- No need to regenerate report after exporting any pdf. Zip files after clicking download button. 
+

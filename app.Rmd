@@ -1,0 +1,6421 @@
+---
+title: "Statistical Reporting Engine"
+output: html_document
+runtime: shiny
+---
+
+```{r, echo=F, include=F}
+knitr::opts_chunk$set(echo = F)
+
+
+source('rscript/functions.R')
+source('rscript/heatmapSubplotUI.R')
+
+library(DT)
+library(plyr)
+library(magrittr)
+library(forcats)
+library(ggplot2)
+library(extrafont)
+library(grid)
+library(shinyjs)
+library(ComplexHeatmap)
+# font_import() run only once after installation of fonts
+
+options(shiny.reactlog = TRUE)
+options(shiny.error = browser)
+## convert warnings to error
+# options(warn = 2)
+# options(shiny.fullstacktrace = TRUE)
+
+# if (Sys.info()['sysname'] == 'Windows') {
+#   loadfonts(device="win")
+#   Sys.setlocale("LC_ALL","Chinese")
+# }
+# suppressPackageStartupMessages(suppressWarnings(library(mixOmics)))
+# required.packages <- c('shiny', 'rmdrkdown', 'FactoMineR', 'gridExtra', 'DT',
+# 'caTools', 'bitops', 'testthat', 'factoextra', 'pheatmap', 'tableone', 'ggpubr', 'multcompView', 'pROC', 'ropls', 'FSA', 'Hmisc', 'mixOmics', 'Hmisc', 'caret')
+
+## install bioconductor packages
+# source('http://www.bioconductor.org/biocLite.R')
+# biocLite('ropls')
+
+tmp_dir <- tempdir()
+tmp_report_dir <- file.path(tmp_dir, 'report')
+if(dir.exists(tmp_report_dir))
+  unlink(tmp_report_dir, recursive = T, force = T)
+
+dir.create(tmp_report_dir)
+
+my_options <- list(
+  version = '1.2019.1005.1600',
+  release_notes = '
+(1) Remove columns in scaled data in OPLS-DA
+(2) Sanitize file name given group names which contain invalid characters for file names
+(3) Change default expand parameter from 0.05 to 0.15 in volcano plot
+(4) Change default N to 10 in plots of differential metabolites
+(5) Show message if names in data.csv and var.csv are inconsistent
+(6) Auto-generate conclusion. 
+(7) Choose type of hypothesis test based on sample size
+    ',
+# dpi = 100, 
+summary_dir = '01_Data_summary',
+ome_summary_prefix = 'data_summary',
+pca_dir = '02_PCA_analysis',
+pca_scree_prefix = 'PCA_scree',
+pca_ind_prefix = 'PCA_ind',
+heatmap_dir = '03_Heatmap',
+heatmap_prefix = 'heatmap',
+oplsda_dir = '04_OPLSDA_analysis',
+oplsda_prefix = 'OPLSDA_',
+hypothesis_test_dir = '05_Hypothesis_test',
+volcano_dir = '06_Volcano_plot',
+volcano_prefix = 'volcano',
+differential_metabolites_dir = '06_Differential_metabolites',
+differential_metabolites_prefix = 'differential_metabolites',
+boxplot_dir = '07_Boxplot',
+boxplot_prefix = 'boxplot',
+barplot_dir = '08_Barplot',
+barplot_prefix = 'barplot',
+
+report_template = list(
+  'English' = 'rmd/001-template_text_en.Rmd',
+  'Chinese' = 'rmd/001-template_text_ch.Rmd'
+),
+rscript = c('rscript/report_chunk.R', 'rscript/functions.R'),
+bib = c('bibliography.bib')
+)
+
+## shiny::plotPNG
+## in some cases, Cairo() provides output that looks worse than png()
+options(
+  shiny.usecairo = FALSE,
+  shiny.maxRequestSize = 30*1024^2
+)
+
+
+
+## set seed
+set.seed(1)
+```
+
+```{r ui}
+fluidPage(
+  
+  shinyjs::useShinyjs(rmd = TRUE),
+  shinyjs::inlineCSS(list(img = "height: auto")),
+  
+  fluidRow(
+    column(
+      12,
+      
+      h5(paste0('Version: ', my_options$version)),
+      
+      h5('Release notes:'),
+      
+      p(my_options$release_notes),
+      
+      a('View release notes',
+        href = 'release_notes.Rmd',
+        target = "_blank"),
+      
+      a('View manual', href = 'manual.Rmd', target = '_blank')
+    )
+  ),
+  
+  fluidRow(
+    column(
+      4,
+      
+      checkboxInput('debug', 'Debug mode (include large RData file in zip file)', F)
+      
+    ),
+    
+    column(
+      4,
+      
+      selectInput('language', 'Report language',
+                  choices = c('English', 'Chinese'),
+                  selected = 'Chinese')
+    ),
+    
+    column(
+      4, 
+      
+      ## global ggplot theme
+      selectInput('ggtheme', 'Global ggplot theme',
+                  choices = c('theme_gray', 'theme_bw', 'theme_linedraw',
+                              'theme_light', 'theme_dark', 'theme_minimal',
+                              'theme_classic', 
+                              'theme_pubr', 'theme_pubclean', 'labs_pubr',
+                              'theme_classic2', 'clean_theme'
+                  ),
+                  selected = 'theme_bw')
+    )
+  ),
+  
+  fluidRow(
+    
+    column(
+      4, 
+      
+      uiOutput('font_family_ui')
+    ),
+    
+    column(
+      4,
+      
+      uiOutput('dpi_ui')
+      
+    ),
+    
+    column(
+      4, 
+      
+      uiOutput('image_format_ui')
+    )
+    
+  ),
+  
+  fluidRow(
+    column(
+      4,
+      
+      checkboxInput('file_utf8', label = 'File encoding as UTF-8', value = F)
+    ),
+    
+    column(
+      4,
+      
+      checkboxInput('outfile_utf8_bom', label = 'Output file encoding as UTF-8-BOM', value = F)
+    )
+  ),
+  
+  h3('1.1 Load data file'),
+  
+  fluidRow(
+    column(
+      4,
+      
+      # Input: Select a file ----
+      fileInput("file1", "Choose CSV File",
+                multiple = FALSE,
+                accept = c("text/csv",
+                           "text/comma-separated-values,text/plain",
+                           ".csv")),
+      
+      
+      # Input: Checkbox if file has header ----
+      checkboxInput("header1", "Header", TRUE),
+      
+      # Input: Select separator ----
+      radioButtons("sep1", "Separator",
+                   choices = c(Comma = ",",
+                               Semicolon = ";",
+                               Tab = "\t"),
+                   selected = ","),
+      
+      # Input: Select quotes ----
+      radioButtons("quote1", "Quote",
+                   choices = c(None = "",
+                               "Double Quote" = '"',
+                               "Single Quote" = "'"),
+                   selected = '"'),
+      
+      # Input: Select number of rows to display ----
+      radioButtons("disp1", "Display",
+                   choices = c(Head = "head",
+                               All = "all"),
+                   selected = "head"),
+      
+      # Unit: Select unit
+      uiOutput('unit_ui'),
+      # selectInput('unit', 'Unit of measured metabolites',
+      #             choices = c('blank' = ' ',
+      #                         'mols' = 'mols', 
+      #                         'mol/g' = 'mol/g', 
+      #                         'mol/mg' = 'mol/mg',
+      #                         'mol/L' = 'mol/L', 
+      #                         'μmoles' = 'mu*moles', 
+      #                         'μmol/g' = 'mu*mol/g',  
+      #                         'μmol/mg' = 'mu*mol/mg', 
+      #                         'μmols/mg protein' = 'mu*mols/mg~protein',
+      #                         'moles/g protein' = 'moles/g~protein', 
+      #                         'μmol/cell' = 'mu*mol/cell', 
+      #                         'μmol/cm2' = 'mu*mol/cm^2', 
+      #                         'μmol/OD' = 'mu*mol/OD', 
+      #                         'μg/g' = 'mu*g/g', 
+      #                         'MFP' = 'MFP', 
+      #                         'MFP to total PL+SPL+Cho' = 'MFP~to~total~PL+SPL+Cho', 
+      #                         'peak area' = 'peak~area', 
+      #                         'labeling fraction' = 'labeling~fraction',
+      #                         'isotopic abundance ratio' = 'isotopic~abundance~ratio')),
+      
+      h4('Data transformation'),
+      
+      checkboxInput('preprocess_handle_missing',
+                    'Replace missing values (0 or blank) by half of global minimum', 
+                    FALSE),
+      
+      checkboxInput('preprocess_log', 'Log transformation', FALSE),
+      
+      checkboxInput('preprocess_sd', 'Unit variance normalization', FALSE)
+    ),
+    
+    column(
+      8,
+      tabsetPanel(type = 'tabs',
+                  tabPanel('Processed data', DTOutput('tbl1')),
+                  tabPanel("Summary of processed data", DTOutput("summary1")),
+                  tabPanel('Raw data', DTOutput('tbl1_raw'))
+      )
+    )
+  ),
+  
+  hr(),
+  h3('1.2 Load sample annotation file'),
+  
+  fluidRow(
+    column(
+      4,
+      
+      # Input: Select a file ----
+      fileInput("file2", "Choose CSV File",
+                multiple = FALSE,
+                accept = c("text/csv",
+                           "text/comma-separated-values,text/plain",
+                           ".csv")),
+      
+      
+      # Input: Checkbox if file has header ----
+      checkboxInput("header2", "Header", TRUE),
+      
+      # Input: Checkbox if file has header ----
+      checkboxInput('group_reorder', 'Reorder sample by group order?', TRUE),
+      
+      # Input: Select separator ----
+      radioButtons("sep2", "Separator",
+                   choices = c(Comma = ",",
+                               Semicolon = ";",
+                               Tab = "\t"),
+                   selected = ","),
+      
+      # Input: Select quotes ----
+      radioButtons("quote2", "Quote",
+                   choices = c(None = "",
+                               "Double Quote" = '"',
+                               "Single Quote" = "'"),
+                   selected = '"'),
+      
+      # Input: Select number of rows to display ----
+      radioButtons("disp2", "Display",
+                   choices = c(Head = "head",
+                               All = "all"),
+                   selected = "head"),
+      
+      # Select: Select group variable
+      uiOutput('group_var_ui'),
+      
+      # Select: Select groups to include
+      uiOutput('group_select_ui'),
+      
+      # Select: Select group order variable
+      uiOutput('group_order_var_ui'),
+      
+      # Select: Select paired variable
+      uiOutput('pair_var_ui')
+    ),
+    
+    column(
+      8,
+      tabsetPanel(type = 'tabs',
+                  tabPanel('Processed data', DTOutput('tbl2')),
+                  tabPanel("Summary of processed data", tableOutput("summary2")),
+                  tabPanel('Raw data', DTOutput('tbl2_raw'))
+      )
+    )
+  ),
+  
+  hr(),
+  h3('1.3 Load variable annotation file'),
+  
+  fluidRow(
+    column(
+      4,
+      
+      # Input: Select a file ----
+      fileInput("file3", "Choose CSV File",
+                multiple = FALSE,
+                accept = c("text/csv",
+                           "text/comma-separated-values,text/plain",
+                           ".csv")),
+      
+      
+      # Input: Checkbox if file has header ----
+      checkboxInput("header3", "Header", TRUE),
+      
+      # Input: Select separator ----
+      radioButtons("sep3", "Separator",
+                   choices = c(Comma = ",",
+                               Semicolon = ";",
+                               Tab = "\t"),
+                   selected = ","),
+      
+      # Input: Select quotes ----
+      radioButtons("quote3", "Quote",
+                   choices = c(None = "",
+                               "Double Quote" = '"',
+                               "Single Quote" = "'"),
+                   selected = '"'),
+      
+      # Input: Select number of rows to display ----
+      radioButtons("disp3", "Display",
+                   choices = c(Head = "head",
+                               All = "all"),
+                   selected = "head")
+    ),
+    
+    column(
+      8,
+      tabsetPanel(type = 'tabs',
+                  tabPanel('Table', DTOutput('tbl3')),
+                  tabPanel("Summary", tableOutput("summary3"))
+      )
+    )
+  ),
+  
+  hr(),
+  h3('2.0 Metabolome/lipidome summary'),
+  
+  fluidRow(
+    column(
+      4, 
+      
+      uiOutput('ome_summary_var_ui'),
+      
+      uiOutput('ome_type_ui'),
+      # selectInput('ome', 'Type of ome data', choices = c('Lipidome', 'Metabolome')),
+      
+      selectInput('metabolites_statistics_order', 'Barplot order',
+                  choices = c('By first appearance',
+                              'By first appearance reversed',
+                              'By frequency increasing',
+                              'By frequency decreasing',
+                              'By alphabet increasing',
+                              'By alphabet decreasing'), 
+                  selected = 'By first appearance'),
+      
+      uiOutput('metabolites_statistics_width_ui'),
+      
+      uiOutput('metabolites_statistics_height_ui'),
+      
+      sliderInput('metabolites_statistics_x_angle', 'X label angle (degree)',
+                  0, 350, 90, 10),
+      
+      sliderInput('metabolites_statistics_hjust', 'Horizontal justification',
+                  0, 1, 1, 0.1),
+      
+      sliderInput('metabolites_statistics_vjust', 'Vertical justification',
+                  0, 1, 0.5, 0.1),
+      
+      actionButton('metabolites_statistics_button', 'Save figure to file')
+    ),
+    
+    column(
+      8,
+      
+      uiOutput('metabolites_statistics_ui')
+    )
+  ),
+  
+  hr(),
+  
+  fluidRow(
+    column(
+      4,
+      
+      p('Class total must be blank for this variable!'),
+      
+      # uiOutput('ome_summary_var_ui'),
+      
+      # selectInput('ome', 'Type of ome data', choices = c('Lipidome', 'Metabolome')),
+      
+      uiOutput('ome_summary_width_ui'),
+      
+      uiOutput('ome_summary_height_ui'),
+      
+      sliderInput(
+        'ome_summary_x_angle', 'X label angle (degree)',
+        0, 350, 90, 10
+      ),
+      
+      sliderInput(
+        'ome_summary_hjust', 'Horizontal justification',
+        0, 1, 1, 0.1
+      ),
+      
+      sliderInput(
+        'ome_summary_vjust', 'Vertical justification',
+        0, 1, 0.5, 0.1
+      ),
+      
+      checkboxInput('ome_summary_ysqrt', 'Rescale Y as square root', value = T),
+      
+      uiOutput('ome_summary_legend_ncol_ui'),
+      
+      actionButton(
+        'ome_summary_button', 'Save figure to file'
+      )
+    ),
+    
+    column(
+      8,
+      
+      uiOutput('ome_summary_ui')
+    )
+  ),
+ 
+  
+  hr(),
+  h3('2.1 Principal Component Analysis'),
+  
+  selectInput('pca_npc', 'Number of components',
+              choices = 2:5, selected = 2),
+  
+  h4('2.1.1 Scree plot'),
+  fluidRow(
+    column(
+      4,
+      
+      uiOutput('pca_scree_top_n_ui'),
+      
+      uiOutput('pca_scree_width_ui'),
+      
+      uiOutput('pca_scree_height_ui'),
+      
+      # sliderInput('pca_scree_width', 'Figure width (px)',
+      #             300, 1600, 1000, 10),
+      # 
+      # sliderInput('pca_scree_height', 'Figure height (px)',
+      #             300, 1600, 800, 10),
+      
+      actionButton('pca_scree_button', 'Save PCA scree plot to file')
+    ),
+    
+    column(
+      8,
+      uiOutput('pca_scree_ui')
+    )
+  ),
+  
+  h4('2.1.2 Individual plot'),
+  
+  fluidRow(
+    column(
+      4,
+
+      uiOutput('pca_ellipse_ui'),
+      
+      checkboxInput('pca_ind_label', 'Show label?', value = T),
+      
+      checkboxInput('pca_ind_mean_point', 'Show mean point?', value = T),
+      
+      uiOutput('pca_ind_group_ui'),
+      
+      uiOutput('pca_ind_width_ui'),
+      
+      uiOutput('pca_ind_height_ui'),
+      
+      # sliderInput('pca_ind_width', 'Figure width (px)',
+      #             300, 1600, 600, 10),
+      # 
+      # sliderInput('pca_ind_height', 'Figure height (px)',
+      #             300, 1600, 500, 10),
+      
+      actionButton('pca_ind_button', 'Save PCA individual plot to file')
+    ),
+    
+    column(
+      8,
+      uiOutput('pca_ind_ui')
+    )
+  ),
+  
+  hr(),
+  h3('3.1 Clustering & Heatmap'),
+  
+  fluidRow(
+    column(
+      4,
+      
+      checkboxInput('heatmap_rotate', 'Rotate the figure?', TRUE),
+      
+      checkboxInput('heatmap_cluster_row', 'Cluster row?'),
+      
+      checkboxInput('heatmap_cluster_col', 'Cluster column?'),
+      
+      checkboxInput('heatmap_show_rownames', 'Show row names?',
+                    TRUE),
+      
+      checkboxInput('heatmap_show_colnames', 'Show column names?',
+                    TRUE),
+      
+      selectInput('heatmap_scale', 'Apply scaling on',
+                  choices = c('row', 'column', 'none'),
+                  selected = 'row'),
+      
+      selectInput('heatmap_color_palette', 'Color palette',
+                  choices = c('navy_white_firebrick3', 'green_black_red',
+                              'BrBG', 'PiYG', 'PRGn', 'PuOr', 'RdBu', 'RdGy',
+                              'RdYlBu', 'RdYlGn', 'Spectral'),
+                  selected = 'navy_white_firebrick3'),
+      
+      selectInput('heatmap_border_color', 'Border color',
+                  choices = c('NA', 'grey60'),
+                  selected = 'grey60'),
+      
+      uiOutput('heatmap_annotate_sample_ui'),
+      
+      uiOutput('heatmap_annotate_var_ui'),
+      
+      uiOutput('heatmap_width_ui'),
+      
+      uiOutput('heatmap_height_ui'),
+      
+      sliderInput('heatmap_fontsize_row', 'Font size for rownames',
+                  1, 20, 10, 1),
+      
+      sliderInput('heatmap_fontsize_col', 'Font size for colnames',
+                  1, 20, 10, 1),
+      
+      uiOutput('heatmap_subplot_by_ui'),
+      
+      actionButton('addHeatmapSubplotBtn', 'Add subplot'),
+      actionButton('removeHeatmapSubplotBtn', 'Remove subplot'),
+      actionButton('printVal', 'print values'),
+      p(''),
+      
+      actionButton('heatmap_button', 'Save heatmap to file')
+    ),
+    
+    column(8,
+           uiOutput('heatmap_ui')
+           # uiOutput('heatmap_subplot_ui')
+    )
+  ),
+  
+  
+  div(id = 'heatmapSubplot'),
+   
+  hr(),
+  h3('3.2 OPLS-DA'),
+  
+  fluidRow(
+    column(
+      4,
+      
+      uiOutput('oplsda_width_ui'),
+      
+      uiOutput('oplsda_height_ui'),
+      
+      checkboxInput('oplsda_label', 'Label sample names?', value = T),
+      
+      actionButton('oplsda_button', 'Save OPLS-DA plot to file')
+    ),
+    
+    column(
+      8,
+      
+      uiOutput('oplsda_ui')
+    )
+  ),
+  
+  hr(),
+  h3('3.3 (Sparse/Multi-level) PLS-DA'),
+  
+  fluidRow(
+    column(
+      4,
+      
+      sliderInput('plsda_width', 'Figure width (px)',
+                  300, 1600, 800, 10),
+      
+      sliderInput('plsda_height', 'Figure height (px)',
+                  300, 1600, 700, 10)
+    ),
+    
+    column(
+      8,
+      
+      uiOutput('plsda_ui')
+    )
+  ),
+  
+  hr(),
+  h3('4.1 Hypothesis testing'),
+  h4('Hypothesis testing and volcano plot was always performed on data of original scale.'),
+  
+  fluidRow(
+    column(
+      4, 
+      
+      textOutput('hypothesis_pair_var'),
+      
+      uiOutput('hypothesis_select_export_ui'),
+      
+      selectInput('padjust', 'P value adjustment method for each P value column',
+                  p.adjust.methods, selected = 'none'),
+      
+      actionButton('hypothesis_test_button', 'Save hypothesis test results to csv files.')
+    ),
+    
+    column(
+      8,
+      
+      DTOutput('hypothesis_tbl'),
+      
+      uiOutput('hypothesis_p')
+    )
+  ),
+  
+  hr(),
+  h3('4.2 Volcano plot'),
+  
+  fluidRow(
+    column(
+      4,
+      # when >2 groups, posthoc pvalue and pair-wise fold is plotted
+      uiOutput('volcano_p_ui'),
+      
+      selectInput(
+        'volcano_sig_lvl', 'Select significance level',
+        choices = c(0.05, 0.01, 0.001), selected = 0.05
+      ),
+      
+      sliderInput(
+        'volcano_fold_cutoff', 'Select fold change cutoff',
+        1, 10, 1.5, 0.1
+      ),
+      
+      sliderInput(
+        'volcano_max_label', 'Max number of labels to display (rank by p value)',
+        0, 100, 10, 1
+      ),
+      
+      sliderInput(
+        'volcano_force', 'Apply force to repel text label',
+        0, 10, 1, 0.1
+      ),
+      
+      sliderInput(
+        'volcano_expand', 'Multiplicative expansion factor (distance away from the axes).',
+        0, 1, 0.15, 0.01
+      ),
+      
+      sliderInput(
+        'volcano_min_segment_length', 'Skip drawing segments shorter than this (unit:lines)',
+        0.1, 0.5, 0.1, 0.1
+      ),
+      
+      uiOutput('volcano_width_ui'),
+      
+      uiOutput('volcano_height_ui'),
+      
+      # 
+      # sliderInput(
+      #     'volcano_height', 'Figure height (px)',
+      #     300, 1600, 600, 10
+      # ),
+      
+      actionButton('volcano_button', 'Save volcano plot to file')
+    ),
+    
+    column(
+      8,
+      
+      uiOutput('volcano_plot_ui')
+    )
+  ),
+  
+  hr(),
+  h3('4.2.1 Differential metabolites'),
+  
+  fluidRow(
+    column(
+      4,
+      # when >2 groups, posthoc pvalue and pair-wise fold is plotted
+      uiOutput('differential_metabolites_p_ui'),
+      
+      selectInput(
+        'differential_metabolites_sig_lvl', 'Select significance level',
+        choices = c(0.05, 0.01, 0.001), selected = 0.05
+      ),
+      
+      sliderInput(
+        'differential_metabolites_fold_cutoff', 'Select fold change cutoff',
+        1, 10, 1.5, 0.1
+      ),
+      
+      uiOutput('differential_metabolites_max_label_ui'),
+      # sliderInput(
+      #   'differential_metabolites_max_label', 'Max number of labels to display (rank by p value)',
+      #   1, 20, 10, 1
+      # ),
+      
+      uiOutput('differential_metabolites_width_ui'),
+      
+      uiOutput('differential_metabolites_height_ui'),
+      
+      actionButton('differential_metabolites_button', 'Save differential metabolites to file')
+    ),
+    
+    column(
+      8,
+      
+      uiOutput('differential_metabolites_plot_ui')
+    )
+  ),
+  
+  hr(),
+  h3('4.3 Boxplot'),
+  
+  fluidRow(
+    column(
+      4,
+      
+      uiOutput('boxplot_top_n_ui'),
+      
+      uiOutput('boxplot_top_n_by_ui'),
+      
+      uiOutput('boxplot_ncol_ui'),
+      
+      checkboxInput('boxplot_notch', 'Notch'),
+      
+      checkboxInput('boxplot_add_point', 'Show points', value = T), 
+      
+      checkboxInput('boxplot_add_jitter', 'Show jitter', value = T),
+      
+      checkboxInput('boxplot_add_violin', 'Show distribution as violin', value = F),
+      
+      checkboxInput('boxplot_add_sig', 'Show significance', value = T),
+      
+      uiOutput('boxplot_posthoc_ui'),
+      
+      uiOutput('boxplot_width_ui'),
+      
+      uiOutput('boxplot_height_ui'),
+      
+      sliderInput(
+        'boxplot_x_angle', 'X label angle (degree)',
+        0, 350, 0, 10
+      ),
+      
+      sliderInput(
+        'boxplot_hjust', 'Horizontal justification',
+        0, 1, 0.5, 0.1
+      ),
+      
+      sliderInput(
+        'boxplot_vjust', 'Vertical justification',
+        0, 1, 0, 0.1
+      ),
+      
+      actionButton(
+        'boxplot_button', 'Save boxplot to file'
+      )
+    ),
+    
+    column(
+      8,
+      
+      uiOutput('boxplot_ui')
+    )
+  ),
+  
+  hr(),
+  h3('4.4 Barplot'),
+  
+  fluidRow(
+    column(
+      4,
+      
+      selectInput('barplot_ci', 'Confidence level',
+                  c(0.95, 0.68), selected = 0.68),
+      
+      uiOutput('barplot_top_n_ui'),
+      
+      uiOutput('barplot_top_n_by_ui'),
+      
+      uiOutput('barplot_ncol_ui'),
+      
+      checkboxInput('barplot_add_point', 'Show points', value = T), 
+      
+      checkboxInput('barplot_add_jitter', 'Show jitter', value = T),
+      
+      checkboxInput('barplot_add_sig', 'Show significance', value = T),
+      
+      uiOutput('barplot_posthoc_ui'),
+      
+      uiOutput('barplot_width_ui'),
+      
+      uiOutput('barplot_height_ui'),
+      
+      sliderInput(
+        'barplot_x_angle', 'X label angle (degree)',
+        0, 350, 0, 10
+      ),
+      
+      sliderInput(
+        'barplot_hjust', 'Horizontal justification',
+        0, 1, 0.5, 0.1
+      ),
+      
+      sliderInput(
+        'barplot_vjust', 'Vertical justification',
+        0, 1, 0, 0.1
+      ),
+      
+      actionButton(
+        'barplot_button', 'Save barplot to file'
+      )       
+    ),
+    
+    column(
+      8,
+      
+      uiOutput('barplot_ui')
+    )
+  ),
+  
+  hr(),
+  h3('Generate & download report'),
+  
+  fluidRow(
+    column(
+      4,
+      
+      actionButton('generate_report_button', 'Generate report'),
+      
+      verbatimTextOutput('report_file')
+      
+    ),
+    
+    column(
+      4,
+      
+      actionButton('export_figures_button', 'Export all the figures')
+    ),
+    
+    column(
+      4,
+      
+      uiOutput('downloadButton_ui')
+    )
+  )
+)
+```
+
+```{r g_data}
+g_data <- reactive({
+  # global data is stored in this list
+  
+  # input$file1 will be NULL initially. After the user selects
+  # and uploads a file, head of that data file by default,
+  # or all rows if selected, will be shown.
+  list(
+    d0 = reactive({
+      ## d1 can be log-transformed and scaled, 
+      ## but d0 can not due to the need to compute fold change
+      req(input$file1)
+      print('load d0')
+      # when reading semicolon separated files,
+      # having a comma separator causes `read.csv` to error
+      encoding <- ifelse(input$file_utf8, 'UTF-8', '')
+      
+      d1 <- tryCatch(
+        {
+          read.csv(input$file1$datapath,
+                   header = input$header1,
+                   sep = input$sep1, check.names = F, row.names = 1,
+                   quote = input$quote1, strip.white = T,
+                   fileEncoding = encoding)
+        },
+        error = function(e) {
+          if (e$message == "duplicate 'row.names' are not allowed") {
+            ## check the first field of every row
+            rl <- stringr::str_extract(readLines(input$file1$datapath), '[^,]+')
+            
+            if (input$header1) {
+              rl <- rl[-1]
+            }
+            
+            rl_na <- which(is.na(rl))
+            ## check empty rows
+            if (length(rl_na) > 0) {
+              ## all the empty rows are at the end
+              if(all(rl_na == (length(rl) - length(rl_na) + 1):length(rl))) {
+                out <- read.csv(
+                  input$file1$datapath,
+                  header = input$header1,
+                  sep = input$sep1, check.names = F, row.names = 1,
+                  quote = input$quote1, strip.white = T,
+                  fileEncoding = encoding,
+                  ## exclude header
+                  nrows = length(rl) - length(rl_na)
+                )
+                return(out)
+              }
+            }
+          }
+          # return a safeError if a parsing error occurs
+          showModal(modalDialog(
+            title = "Error encountered while loading data file",
+            e$message,
+            easyClose = TRUE
+          ))
+          Sys.sleep(5)
+          return(NULL)
+        }
+      )
+     
+      if (any(stringr::str_trim(rownames(d1)) == '')) {
+        print('Blank row names')
+        showModal(modalDialog(
+          title = "Blank row names",
+          paste0(
+            'Blank row names at: ',
+            paste0(which(stringr::str_trim(rownames(d1)) == ''), collapse = ',')
+          ),
+          easyClose = F
+        ))
+        Sys.sleep(5)
+        d1 <- d1[stringr::str_trim(rownames(d1)) != '', ]
+      }
+
+      tryCatch(
+        {
+          make.names(rownames(d1))
+        },
+        error = function(e) {
+          showModal(modalDialog(
+            title = "Invalid row names",
+            e$message,
+            easyClose = TRUE
+          ))
+          Sys.sleep(5)
+        }
+      )
+
+      if (any(stringr::str_trim(colnames(d1)) == '')) {
+        print('Blank column names')
+        showModal(modalDialog(
+          title = "Blank column names",
+          paste0(
+            'Blank column names at: ',
+            paste0(which(stringr::str_trim(colnames(d1)) == ''), collapse = ',')
+          ),
+          easyClose = F
+        ))
+        Sys.sleep(5)
+        d1 <- d1[, stringr::str_trim(colnames(d1)) != '']
+      }
+
+      tryCatch(
+        {
+          make.names(colnames(d1))
+        },
+        error = function(e) {
+          showModal(modalDialog(
+            title = "Invalid column names",
+            e$message,
+            easyClose = TRUE
+          ))
+          Sys.sleep(5)
+        }
+      )
+
+      if (any(duplicated(colnames(d1)))) {
+        showModal(modalDialog(
+          title = "Duplicated column names",
+          paste(colnames(d1)[duplicated(colnames(d1))],
+                collapse = ','),
+          easyClose = TRUE
+        ))
+        Sys.sleep(5)
+      }
+
+      if (any(duplicated(rownames(d1)))) {
+        showModal(modalDialog(
+          title = "Duplicated row names",
+          paste(rownames(d1)[duplicated(rownames(d1))],
+                collapse = ','),
+          easyClose = TRUE
+        ))
+        Sys.sleep(5)
+      }
+
+      ## warning message for NA
+      if (any(is.na(d1))) {
+        showModal(modalDialog(
+          title = "Missing values exist",
+          paste(colnames(d1)[apply(d1, 2, function(x) {any(is.na(x))})],
+                collapse = ','),
+          easyClose = TRUE
+        ))
+        Sys.sleep(5)
+      }
+      
+      ## check column type
+      if (!all(sapply(d1, is.numeric))) {
+        ind_cols <- which(!sapply(d1, is.numeric))
+        showModal(modalDialog(
+          title = "Non-numeric colum exists",
+          paste(paste(colnames(d1)[ind_cols], collapse = ','),
+                'is not numeric.'),
+          easyClose = TRUE
+        ))
+        Sys.sleep(5)
+        return(NULL)
+      }
+      
+      if (any(apply(d1, 2, sd) == 0)) {
+        print('Column with 0 variation exists')
+        showModal(modalDialog(
+          title = "Column with 0 variation exists",
+          paste(colnames(d1)[apply(d1, 2, sd) == 0],
+                collapse = ','),
+          easyClose = TRUE
+        ))
+        Sys.sleep(5)
+      }
+
+      if(input$preprocess_handle_missing) {
+        ## find the smallest positive values
+        minimum <- apply(d1, 2, function(x) {
+          min(x[x > 0])
+        }) %>% min
+        # d1 <- apply(d1, 2, function(x) {
+        #     x[is.na(x) | x == 0] <- minimum / 2
+        #     x
+        # })
+        for (i in 1:ncol(d1)) {
+          d1[is.na(d1[, i]) | d1[, i] == 0, i] <- minimum / 2
+        }
+      }
+      print('end load d0')
+      print(rownames(d1))
+      d1
+    }),
+    
+    d1 = reactive({
+      req(g_data()$d0())
+      req(g_data()$d2())
+      print('load d1')
+      ## d1 can be log-transformed and scaled, but d0 can not due to the need to compute fold change
+      d0 <- g_data()$d0()
+      d2 <- g_data()$d2()
+      
+      ## d2: sample.csv is already ordered and filtered
+      d1 <- d0[rownames(d2), ]
+      
+      if(input$preprocess_log) {
+        d1 <- log(d1)
+      }
+      
+      if(input$preprocess_sd) {
+        d1 <- scale(d1, center = T, scale = T)
+      }
+      
+      print('end load d1')
+      print(rownames(d1))
+      d1
+    }),
+    
+    summary1 = reactive({
+      req(g_data()$d1())
+      print('summary1')
+      t(sapply(g_data()$d1(), function(x) {summary(na.omit(x))}))
+    }),
+    
+    ## raw sample annotation
+    d2_raw = reactive({
+      req(input$file2)
+      print('load d2_raw')
+      
+      encoding <- ifelse(input$file_utf8, 'UTF-8', '')
+      
+      d2 <- tryCatch(
+        {
+          read.csv(input$file2$datapath,
+                   header = input$header2,
+                   sep = input$sep2, check.names = F, row.names = 1,
+                   quote = input$quote2, strip.white = T,
+                   fileEncoding = encoding)
+        },
+        error = function(e) {
+          if (e$message == "duplicate 'row.names' are not allowed") {
+            ## check the first field of every row
+            rl <- stringr::str_extract(readLines(input$file2$datapath), '[^,]+')
+            
+            if (input$header2) {
+              rl <- rl[-1]
+            }
+            
+            rl_na <- which(is.na(rl))
+            ## check empty rows
+            if (length(rl_na) > 0) {
+              ## all the empty rows are at the end
+              if(all(rl_na == (length(rl) - length(rl_na) + 1):length(rl))) {
+                out <- read.csv(
+                  input$file2$datapath,
+                  header = input$header2,
+                  sep = input$sep2, check.names = F, row.names = 1,
+                  quote = input$quote2, strip.white = T,
+                  fileEncoding = encoding,
+                  ## exclude header
+                  nrows = length(rl) - length(rl_na)
+                )
+                return(out)
+              }
+            }
+          }
+          # return a safeError if a parsing error occurs
+          showModal(modalDialog(
+            title = "Error encountered while loading sample annotation file.",
+            e$message,
+            easyClose = TRUE
+          ))
+          Sys.sleep(5)
+          return(NULL)
+        }
+      )
+      
+      tryCatch(
+        {
+          make.names(rownames(d2))
+        },
+        error = function(e) {
+          showModal(modalDialog(
+            title = "Invalid row names",
+            e$message,
+            easyClose = TRUE
+          ))
+          Sys.sleep(5)
+        }
+      )
+      
+      tryCatch(
+        {
+          make.names(colnames(d2))
+        },
+        error = function(e) {
+          showModal(modalDialog(
+            title = "Invalid column names",
+            e$message,
+            easyClose = TRUE
+          ))
+          Sys.sleep(5)
+        }
+      )
+      
+      if (any(duplicated(colnames(d2)))) {
+        showModal(modalDialog(
+          title = "Duplicated column names",
+          paste(colnames(d2)[duplicated(colnames(d2))],
+                collapse = ','),
+          easyClose = TRUE
+        ))
+        Sys.sleep(5)
+      }
+      
+      if (any(duplicated(rownames(d2)))) {
+        showModal(modalDialog(
+          title = "Duplicated row names",
+          paste(rownames(d2)[duplicated(rownames(d2))],
+                collapse = ','),
+          easyClose = TRUE
+        ))
+        Sys.sleep(5)
+      }
+      print('end load d2_raw')
+      d2
+    }),
+    
+    d2 = reactive({
+      req(g_data()$d2_raw())
+      req(input$group_var)
+      req(input$group_order_var)
+      req(input$groups_selected)
+      
+      print('load d2')
+      d2 <- g_data()$d2_raw()
+      group_reorder <- input$group_reorder
+      group_var <- input$group_var
+      group_order_var <- input$group_order_var
+      groups_selected <- input$groups_selected
+      
+      ## Group order var is not available
+      if (group_order_var == 'None') {
+        group_reorder <- FALSE
+        d2[, group_var] <- factor(d2[, group_var])
+      } else {
+        group_levels <- unique(d2[order(d2[, group_order_var]), group_var])
+        d2[, group_var] <- factor(d2[, group_var], levels = group_levels)
+        
+        ## samples are already ordered by group order
+        ## need correction
+        if (identical(order(d2[, group_var]), seq_len(nrow(d2)))) {
+          group_reorder <- FALSE
+        }
+      }
+      
+      ## do reorder first, then subset
+      if (group_reorder) {
+        showModal(modalDialog(
+          title = "Samples are not ordered by group order!",
+          "Samples are not ordered by group order. Reorder automatically.",
+          easyClose = TRUE
+        ))
+        Sys.sleep(5)
+        
+        group_order <- order(d2[, group_var])
+
+        d2 <- d2[group_order, ]        
+      }
+      
+      if (length(groups_selected) < 2) {
+        showModal(modalDialog(
+          title = "Error in group selection",
+          'Must select more than 1 groups. All the groups will be selected.',
+          easyClose = TRUE
+        ))
+        Sys.sleep(5)
+      } else {
+        ind <- which(d2[, group_var] %in% groups_selected)
+        
+        d2 <- d2[ind, , drop = F] %>% droplevels()
+      }
+      
+      print('end load d2')
+      d2
+    }),
+    
+    ## variable annotation
+    d3 = reactive({
+      req(input$file3)
+      # somehow commenting the above line make input$file3 optional,
+      # otherwise error will be raised when accessing d3
+      print('load d3')
+      
+      encoding <- ifelse(input$file_utf8, 'UTF-8', '')
+      d3 <- tryCatch(
+        {
+          read.csv(input$file3$datapath,
+                   header = input$header3,
+                   sep = input$sep3, check.names = F, row.names = 1,
+                   quote = input$quote3, strip.white = T,
+                   fileEncoding = encoding)
+        },
+        error = function(e) {
+          # return a safeError if a parsing error occurs
+          showModal(modalDialog(
+            title = "Error encountered while loading variable annotation file.",
+            e$message,
+            easyClose = TRUE
+          ))
+          Sys.sleep(5)
+          return(NULL)
+        }
+      )
+      
+      tryCatch(
+        {
+          make.names(rownames(d3))
+        },
+        error = function(e) {
+          showModal(modalDialog(
+            title = "Invalid row names",
+            e$message,
+            easyClose = TRUE
+          ))
+          Sys.sleep(5)
+        }
+      )
+      
+      tryCatch(
+        {
+          make.names(colnames(d3))
+        },
+        error = function(e) {
+          showModal(modalDialog(
+            title = "Invalid column names",
+            e$message,
+            easyClose = TRUE
+          ))
+          Sys.sleep(5)
+        }
+      )
+      
+      if (any(duplicated(colnames(d3)))) {
+        showModal(modalDialog(
+          title = "Duplicated column names",
+          paste(colnames(d3)[duplicated(colnames(d3))],
+                collapse = ','),
+          easyClose = TRUE
+        ))
+        Sys.sleep(5)
+      }
+      
+      if (any(duplicated(rownames(d3)))) {
+        showModal(modalDialog(
+          title = "Duplicated row names",
+          paste(rownames(d3)[duplicated(rownames(d3))],
+                collapse = ','),
+          easyClose = TRUE
+        ))
+        Sys.sleep(5)
+      }
+      print('end load d3')
+      d3
+    }),
+    
+    ## global ggplot theme: affect PCA scree plot, score plot
+    ## volcano plot, boxplot and barplot
+    ggtheme = reactive({
+      req(input$ggtheme)
+      req(input$font_family)
+      print('ggtheme')
+      ## apply font_family to ggplot graphs
+      font_family <- input$font_family
+      
+      res <- switch(input$ggtheme,
+                    theme_gray = theme_gray(),
+                    theme_bw = theme_bw(),
+                    theme_linedraw = theme_linedraw(),
+                    theme_light = theme_light(),
+                    theme_dark = theme_dark(),
+                    theme_minimal = theme_minimal(),
+                    theme_classic = theme_classic(),
+                    theme_pubr = ggpubr::theme_pubr(),
+                    theme_pubclean = ggpubr::theme_pubclean(),
+                    labs_pubr = ggpubr::labs_pubr(),
+                    theme_classic2 = ggpubr::theme_classic2(),
+                    clean_theme = ggpubr::clean_theme()
+      )
+      print('end ggtheme')
+      res <- res + theme(text = element_text(family = font_family))
+    }),
+    
+    ## raw group value for creating ordered group
+    group0 = reactive({
+      req(input$group_var)
+      req(g_data()$d2_raw())
+      print('group0')
+      group0 <- factor(g_data()$d2_raw()[, input$group_var])
+      
+      if (any(table(group0) < 3)) {
+        showModal(modalDialog(
+          title = "Not enough observations in some groups",
+          paste('There are less than 3 observations in', 
+                paste0(levels(group0)[table(group0) < 3], collapse = ', ')
+          ),
+          easyClose = TRUE
+        ))
+        Sys.sleep(5)
+      }
+      print('end group 0')
+      group0
+    }),
+    
+    group = reactive({
+      req(input$group_var)
+      req(g_data()$d2())
+      print('group')
+      ## if group_order_var is not None
+      ## make group an ordered factor
+      d2 <- g_data()$d2()
+      group_var <- input$group_var
+      group <- d2[, group_var]
+      group
+    }),
+    
+    pair = reactive({
+      print('pair')
+      if (input$pair_var == 'None')
+        return(NULL)
+      print('end pair')
+      as.factor(g_data()$d2()[, input$pair_var])
+    }),
+    
+    metabolites_statistics = reactive({
+      req(T)
+      req(g_data()$d3())
+      req(input$ome_summary_variable)
+      
+      print('metabolites_statistics')
+      
+      d3 <- g_data()$d3()
+      ## ggplot theme
+      ggtheme <- g_data()$ggtheme()
+      font_family <- input$font_family
+      
+      x_angle <- input$metabolites_statistics_x_angle
+      v_just <- input$metabolites_statistics_vjust
+      h_just <- input$metabolites_statistics_hjust
+      
+      ## order
+      f_order <- switch (input$metabolites_statistics_order,
+        `By first appearance` = forcats::fct_inorder,
+        `By first appearance reversed` = function(x) {
+          forcats::fct_rev(forcats::fct_inorder(x))
+          },
+        `By frequency decreasing` = forcats::fct_infreq,
+        `By frequency increasing` = function(x) {
+          forcats::fct_rev(forcats::fct_infreq(x))
+        },
+        `By alphabet increasing` = identity,
+        `By alphabet decreasing` = function(x) {
+          forcats::fct_rev(x)
+        }
+      )
+      
+      ## remove blank rows
+      d <- data.frame(class = d3[, input$ome_summary_variable]) %>% 
+        dplyr::filter(stringr::str_trim(class) != '')
+      
+      p <- ggplot(d, aes(x = f_order(class))) +
+        geom_bar(fill = 'gray40') +
+        geom_text(aes(label = stat(count)), stat = 'count',
+                  vjust = -0.2, family = font_family) +
+        scale_y_continuous(expand = expansion(mult = c(0, 0.1), add = c(0, 0))) +
+        labs(x = '', y = 'Count', title = paste(input$ome, 'summary')) +
+        ggtheme +
+        theme(axis.text.x = element_text(angle = x_angle, vjust = v_just, hjust = h_just))
+      print('end metabolites_statistics')
+      p
+    }),
+    
+    ome_summary = reactive({
+      req(T)
+      req(g_data()$d1())
+      req(g_data()$d3())
+      req(input$ome_summary_variable)
+      req(input$ome)
+      
+      print('ome summary')
+      
+      d1 <- g_data()$d1()
+      d3 <- g_data()$d3()
+      ## ggplot theme
+      ggtheme <- g_data()$ggtheme()
+      font_family <- input$font_family
+      
+      x_angle <- input$ome_summary_x_angle
+      v_just <- input$ome_summary_vjust
+      h_just <- input$ome_summary_hjust
+      
+      group_var <- factor(d3[, input$ome_summary_variable])
+      group <- g_data()$group()
+      
+      # legend ncol
+      legend_ncol <- input$ome_summary_legend_ncol
+      
+      # unit
+      # trim changes " " to ""
+      unit <- stringr::str_trim(input$unit)
+      ome <- input$ome
+      ysqrt <- input$ome_summary_ysqrt
+      
+      ## order
+      f_order <- switch (input$metabolites_statistics_order,
+        `By first appearance` = forcats::fct_inorder,
+        `By first appearance reversed` = function(x) {
+          forcats::fct_rev(forcats::fct_inorder(x))
+          },
+        `By frequency decreasing` = forcats::fct_infreq,
+        `By frequency increasing` = function(x) {
+          forcats::fct_rev(forcats::fct_infreq(x))
+        },
+        `By alphabet increasing` = as.factor,
+        `By alphabet decreasing` = function(x) {
+          forcats::fct_rev(x)
+        }
+      )
+      
+      ## order x axis
+      lvls <- f_order(d3[, input$ome_summary_variable]) %>%
+        levels()
+      
+      ## abundance summary
+      ## class total in individual sample
+      if(nlevels(group_var) > 1) {
+        d <- apply(d1, 1, function(x) {
+        vaggregate(x, group_var, sum)
+      }) %>% `rownames<-`(levels(group_var))
+      } else {
+        d <- apply(d1, 1, function(x) {
+        vaggregate(x, group_var, sum)
+      }) %>% t %>% as.data.frame %>% `rownames<-`(levels(group_var))
+      }
+      
+
+      ## remove class total
+      d <- d[rownames(d) != '', , drop = F]
+      
+      ## group avergage
+      d <- d %>% 
+        apply(1, function(x) {
+          vaggregate(x, group, mean)
+        }) %>% `rownames<-`(
+          levels(group)
+        ) %>% reshape2::melt() %>%
+        mutate(
+          Var1 = factor(Var1, levels = levels(group)),
+          Var2 = factor(Var2, levels = lvls)
+        )
+      
+      ## return
+      p_list <- NULL
+      
+      if (1) {
+        p <- ggplot(d, aes(x = Var2, y = value, fill = Var1)) +
+          geom_bar(stat = 'identity', position = 'dodge') +
+          guides(fill = guide_legend(title = '', ncol = legend_ncol)) +
+          ggtheme +
+          theme(axis.text.x = element_text(angle = x_angle, vjust = v_just, hjust = h_just),
+                legend.position = 'bottom')
+        
+        if (ysqrt) {
+          p <- p + scale_y_sqrt()
+        }
+        
+        ## parse cause error in ifelse 
+        if (unit == '') {
+          p <- p + labs(x = '',
+                        y = 'Abundance',
+                        title = paste(ome, 'summary'))
+        } else {
+          p <- p + labs(x = '',
+                        y = parse(text = paste0('Abundance~(', unit, ')')),
+                        title = paste(ome, 'summary'))
+        }
+        
+        if (is.null(p_list)) {
+          p_list <- list()
+        }
+        p_list$ome_summary <- p
+      }
+      print('end ome summary')
+      p_list
+    }),
+    
+    ome_summary_text = reactive({
+      req(T)
+      ## part I
+      req(g_data()$d3())
+      req(input$ome_summary_variable)
+      
+      print('metabolites_statistics text')
+      
+      d3 <- g_data()$d3()
+     
+      ## count
+      tbl <- table(d3[, input$ome_summary_variable])
+      
+      ## remove blank rows
+      d <- data.frame(class = names(tbl), n = as.vector(tbl)) %>% 
+        dplyr::filter(stringr::str_trim(class) != '')
+      
+      
+      out <- sprintf(
+        '第一张图表示这次检测提供了%s等%d类脂质/代谢物，其中%s鉴定的种类最多（%d种），%s最少（%d种）。',
+        paste0(d[order(d$n, decreasing = T)[1:min(3, nrow(d))], 'class'], collapse = ','),
+        nrow(d),
+        paste0(d[d$n == max(d$n), 'class'], collapse = ','),
+        max(d$n),
+        paste0(d[d$n == min(d$n), 'class'], collapse = ','),
+        min(d$n)
+      )
+      
+      req(g_data()$d1())
+      req(g_data()$d3())
+      req(input$ome_summary_variable)
+      req(input$ome)
+      
+      print('ome summary text')
+      
+      d1 <- g_data()$d1()
+      d3 <- g_data()$d3()
+
+      group_var <- factor(d3[, input$ome_summary_variable])
+      group <- g_data()$group()
+      
+      ome <- input$ome
+
+      
+      ## abundance summary
+      ## class total in individual sample
+      d <- apply(d1, 1, function(x) {
+        vaggregate(x, group_var, sum)
+      }) %>% 
+        `rownames<-`(levels(group_var))
+      
+      ## remove class total
+      d <- d[rownames(d) != '', ]
+      
+      ## group avergage
+      d <- rowSums(d)
+      
+      out <- paste(
+        out,
+        sprintf("第二张图表示了各个分组中每一类代谢物或脂质的平均含量，每个分组用不同的颜色表示。其中%s的平均含量是最高的。",
+                names(d)[order(d, decreasing = T)[1]]
+        )
+      )
+      
+      out
+    }),
+    
+    pca = reactive({
+      req(T)
+      req(g_data()$d1())
+      # req(g_data()$d2())
+      
+      print('pca')
+      
+      d <- g_data()$d1()
+      # NPC <- input$pca_npc
+      
+      # testthat::expect_equal(rownames(d), rownames(g_data()$d2()))
+      validate(
+        need(ncol(d) > 1, 'At least 2 columns are needed for PCA.')
+      )
+      
+      pca <- FactoMineR::PCA(d, scale.unit = TRUE, graph = FALSE)
+      
+      print('end pca')
+      pca
+    }),
+    
+    pca_scree = reactive({
+      req(T)
+      req(g_data()$pca())
+      req(input$pca_npc)
+      req(input$pca_scree_top_n) 
+      print('pca_scree')
+      
+      NPC <- input$pca_npc
+      # 
+      # testthat::expect_equal(rownames(d), rownames(g_data()$d2()))
+      #  
+      # pca <- FactoMineR::PCA(d, scale.unit = TRUE, graph = FALSE)
+      pca <- g_data()$pca()
+      ## show top N contributors
+      top_n <- input$pca_scree_top_n
+      ## ggplot theme
+      ggtheme.scree <- g_data()$ggtheme()
+      ggtheme.loading <- g_data()$ggtheme() + 
+        theme(axis.text.x = element_text(angle = 80, hjust = 1))
+      font_family <- input$font_family
+      
+      scree.plot <- factoextra::fviz_screeplot(
+        pca, addlabels = TRUE) + 
+        scale_y_continuous(expand = expansion(
+          mult = c(0.05, 0.05), add = c(0, 5)
+        )) + 
+        scale_x_discrete(expand = expansion(mult = c(0.05, 0.05), 
+                                               add = c(0.25, 0.6))) +
+        ggtheme.scree 
+      
+      scree.plot <- grid_fam(scree.plot, font_family)
+      
+      ## Contributions of variables to PC1 to PC#NCP
+      lst.plot <- lapply(1:NPC, function(x) {
+        factoextra::fviz_contrib(pca, choice = "var",
+                                 axes = x, top = top_n) + 
+          labs(x = '') + ggtheme.loading
+      })
+      
+      ## put scree.plot and lst.plot in one list to apply grid.arrange
+      lst.all <- vector(mode = 'list', length = 1 + length(lst.plot))
+      lst.all[[1]] <- scree.plot
+      lst.all[2:length(lst.all)] <- lst.plot
+      
+      print('End of pca_scree')
+      
+      ## return gtable
+      # do.call(purrr::partial(gridExtra::grid.arrange, ncol = 2), lst.all)
+      gridExtra::arrangeGrob(grobs = lst.all, ncol = 2)
+    }),
+    
+    pca_scree_text = reactive({
+      req(T)
+      req(g_data()$pca())
+      req(input$pca_npc)
+      req(input$pca_scree_top_n) 
+      print('pca_scree text')
+      
+      pca <- g_data()$pca()
+      pca_npc <- as.numeric(input$pca_npc)
+      pca_scree_top_n <- as.numeric(input$pca_scree_top_n)
+      
+      txt <- sprintf(
+        '左上方的碎石图显示%s能累计解释接近%.0f%%的样品间的整体方差。其余的载荷图显示组成前%d个主成分的前%d个贡献度最高的脂质/代谢物。',
+        paste0(
+          lapply(1:pca_npc, function(i) {
+            if (i == 1) {
+              sprintf('主成分%d（Dim-%d:%.1f%%）', i, i, pca$eig[i, "percentage of variance"])
+            } else if (i == pca_npc) {
+              sprintf('和主成分%d（Dim-%d:%.1f%%）', i, i, pca$eig[i, "percentage of variance"])
+            } else {
+              sprintf('，主成分%d（Dim-%d:%.1f%%）', i, i, pca$eig[i, "percentage of variance"])
+            }
+          }),
+          collapse = ''
+        ),
+        round(pca$eig[pca_npc, "cumulative percentage of variance"], 0),
+        pca_npc,
+        pca_scree_top_n
+      )
+      
+      txt
+    }),
+    
+    pca_ind = reactive({
+      req(T)
+      req(input$pca_ind_group)
+      req(g_data()$pca())
+      req(input$pca_ellipse)
+
+      print('pca_ind')
+
+      if (input$pair_var == 'None') {
+        pair <- NA
+      } else {
+        pair <- as.factor(g_data()$pair())
+      }
+     
+      ## global ggplot theme
+      ggtheme <- g_data()$ggtheme()
+      pca <- g_data()$pca()
+      npc <- as.numeric(input$pca_npc)
+      font_family <- input$font_family
+      label <- ifelse(input$pca_ind_label, 'all', 'none')
+      mean_point <- input$pca_ind_mean_point
+      
+      if (input$pca_ind_group == input$group_var) {
+        g <- g_data()$group()
+      } else {
+        g <- as.factor(g_data()$d2()[, input$pca_ind_group])
+      }
+      
+      comps <- list()
+      for (i in 1:(npc - 1)) {
+        for (j in (i+1) : npc)
+          comps[[length(comps) + 1]] <- c(i, j)
+      }
+      
+      add_ellipse <- ifelse(input$pca_ellipse == 'none', FALSE, TRUE)
+      ellipse_type <- ifelse(input$pca_ellipse == 'none', 'norm', input$pca_ellipse)
+      
+      if (identical(pair, NA)) {
+      plot_output_list <- lapply(comps, function(x) {
+        
+        p <- factoextra::fviz_pca_ind(
+          X = pca, axes = x,
+          repel = FALSE, # hide individual labels
+          habillage = g, # color by groups
+          # palette = cbPalette,
+          label = label,
+          mean.point = mean_point,
+          addEllipses = add_ellipse, # Concentration ellipses
+          ellipse.type = ellipse_type,
+          ellipse.level = 0.95,
+          title = ''
+        ) + ggtheme
+        print('pca_ind grid_fam')
+        # gg <- grid_fam(p, font_family)
+        p
+      })   
+      } else {
+      plot_output_list <- lapply(comps, function(x) {
+        
+        p <- factoextra::fviz_pca_ind(
+          X = pca, axes = x,
+          repel = FALSE, # hide individual labels
+          habillage = g, # color by groups
+          # palette = cbPalette,
+          label = label,
+          mean.point = mean_point,
+          addEllipses = add_ellipse, # Concentration ellipses
+          ellipse.type = ellipse_type,
+          ellipse.level = 0.95,
+          title = ''
+        ) + 
+        ggtheme + 
+        geom_line(aes(group = pair), color = 'black', alpha = 0.6)
+        
+        
+        print('pca_ind grid_fam')
+        # gg <- grid_fam(p, font_family)
+        p
+      })    
+      }
+      ## return gtable
+
+    
+      
+      print('End pca_ind')
+      plot_output_list
+    }),
+    
+    heatmap = reactive({
+      req(T)
+      req(g_data()$d1())
+      req(g_data()$group())
+
+      print('heatmap')
+      
+      d <- g_data()$d1()
+      g <- g_data()$group()
+      d2 <- g_data()$d2()
+      d3 <- g_data()$d3()
+      d <- d[rownames(d2),]
+      
+      scale_rows = function(x){
+        m = apply(x, 1, mean, na.rm = T)
+        s = apply(x, 1, sd, na.rm = T)
+        return((x - m) / s)
+      }
+
+      scale_mat = function(mat, scale){
+        if(!(scale %in% c("none", "row", "column"))){
+            stop("scale argument shoud take values: 'none', 'row' or 'column'")
+        }
+        mat = switch(scale, 
+                     none = mat, 
+                     column = scale_rows(mat), 
+                     row = t(scale_rows(t(mat)))
+                     )
+        return(mat)
+      }
+      
+      d <- scale_mat(d, input$heatmap_scale)
+      # b <- max(abs(min(d)), abs(max(d)))
+      
+      cluster_rows <- input$heatmap_cluster_row
+      cluster_cols <- input$heatmap_cluster_col
+      show_rownames <- input$heatmap_show_rownames
+      show_colnames <- input$heatmap_show_colnames
+      fontsize_row <- input$heatmap_fontsize_row
+      fontsize_col <- input$heatmap_fontsize_col
+      font_family <- input$font_family
+      color_palette <- input$heatmap_color_palette
+      if (color_palette == 'navy_white_firebrick3') {
+        color <- colorRampPalette(c("navy", "white", "firebrick3"))(3)
+      } else if (color_palette == 'green_black_red') {
+        color <- colorRampPalette(c("green", "black", "red"))(3)
+      } else {
+        color <- colorRampPalette(rev(RColorBrewer::brewer.pal(n = 7, name =
+  color_palette)))(3)
+      }
+      border_color <- input$heatmap_border_color
+      if (border_color == 'NA') border_color <- NA
+
+      if (!is.null(input$heatmap_annotate_sample)) {
+        # req(g_data()$d2())
+        validate(
+          need(g_data()$d2(), 'Sample file is required for sample annotation')
+        )
+        annotation_sample <- g_data()$d2()[, input$heatmap_annotate_sample,
+                                           drop = F]
+        ## take care of ordered group
+        if (input$group_var %in% input$heatmap_annotate_sample) {
+          annotation_sample[, input$group_var] <- g
+        }
+      } else {
+        annotation_sample <- NA
+      }
+
+      if (!is.null(input$heatmap_annotate_variable)) {
+        annotation_variable <- g_data()$d3()[, input$heatmap_annotate_variable,
+                                             drop = F]
+      } else {
+        annotation_variable <- NA
+      }
+      
+      if (input$heatmap_rotate) {
+        d <- t(d)
+        annotation_row <- annotation_variable
+        annotation_col <- annotation_sample
+      } else {
+        annotation_row <- annotation_sample
+        annotation_col <- annotation_variable
+      }
+      
+      gg_color_hue <- function(n) {
+        hues = seq(15, 375, length = n + 1)
+        hcl(h = hues, l = 65, c = 100)[1: n]
+      }
+      
+      gg_color_hue_row <- function(n) {
+        set.seed(123)
+        hues = sample(15:375, n + 1 , replace = F)
+        hcl(h = hues, l = 65, c = 100)[1:n]
+      }
+      
+      
+      if (identical(annotation_col, NA)){
+        top_annotation <-  NULL
+      } else{
+        col_sample <- input$heatmap_annotate_sample
+        ncol_name <- nlevels(factor(annotation_col[, input$heatmap_annotate_sample]))
+        col_name <- levels(factor(annotation_col[, input$heatmap_annotate_sample]))
+        col_cols <- gg_color_hue(ncol_name)
+        top_annotation <-  HeatmapAnnotation(df = annotation_col,
+                                             col = list('Group' = structure(col_cols, 
+                                                                          names = c(col_name)),
+                                                        'Order' = structure(col_cols, 
+                                                                          names = c(col_name))
+                                                        ),
+                                             annotation_name_gp = gpar(fontface = 'bold',
+                                                                       fontfamily = font_family)                                                       )
+      }
+         
+      if (identical(annotation_row, NA)){
+        left_annotation <-  NULL
+      } else{
+        nrow_name <- nlevels(factor(annotation_row[, input$heatmap_annotate_variable]))
+        row_name <- levels(factor(annotation_row[, input$heatmap_annotate_variable]))
+        row_cols <- gg_color_hue_row(nrow_name)
+        left_annotation = rowAnnotation(df = annotation_row,
+                                        col = list('Class' = structure(row_cols,
+                                                                     names = c(row_name)),
+                                                   'Class total' = structure(row_cols,
+                                                                     names = c(row_name)),
+                                                   'Class 1' = structure(row_cols,
+                                                                     names = c(row_name)),
+                                                   'HMDB link' = structure(row_cols,
+                                                                     names = c(row_name)),
+                                                   'HMDB ID' = structure(row_cols,
+                                                                     names = c(row_name))
+                                                   ),
+                                        annotation_name_gp = gpar(fontface = 'bold', 
+                                                                  fontfamily = font_family)
+                                        )
+      }
+
+      ht_opt(
+        legend_title_gp = gpar(fontfamily = font_family),
+        legend_labels_gp = gpar(fontfamily = font_family)
+      )
+
+      print('end heatmap')
+      # fontfamily cause warnings like:
+      # character 0x65 does not include the letter spacing
+      # pheatmap::pheatmap(
+      #   d, scale = input$heatmap_scale,
+      #   color = color, border_color = border_color,
+      #   cluster_rows = cluster_rows, cluster_cols = cluster_cols,
+      #   annotation_row = annotation_row, annotation_col = annotation_col,
+      #   show_rownames = show_rownames, show_colnames = show_colnames,
+      #   fontsize_row = fontsize_row, fontsize_col = fontsize_col,
+      #   silent = T
+      # )
+
+      # ComplexHeatmap
+      ComplexHeatmap::Heatmap(
+        d,
+        name = 'SD',
+        ## color
+        col = circlize::colorRamp2(breaks = c(min(d), 0, max(d)), colors = color),
+        rect_gp = gpar(col = border_color),
+
+        ## cluster
+        cluster_rows = cluster_rows,
+        cluster_columns = cluster_cols,
+
+        ## row_names & fontsize
+        show_row_names = show_rownames,
+        row_names_gp = gpar(fontsize = fontsize_row, fontfamily = font_family),
+
+        ## col_names & fontsize
+        show_column_names = show_colnames,
+        column_names_gp = gpar(fontsize = fontsize_col, fontfamily = font_family),
+        # column_names_rot = 270,
+        # column_names_centered = T, 
+        
+        # ## legend
+        # heatmap_legend_param = list(legend_height = unit(1, 'in')),
+
+        ## annotation
+        top_annotation = top_annotation,
+        left_annotation = left_annotation
+        )
+    }),
+    
+    heatmap_subplot = reactive({
+      req(T)
+      req(g_data()$d1())
+      req(g_data()$group())
+      req(input$heatmap_subplot_by)
+      
+      print('heatmap_subplot')
+      
+      if (input$heatmap_subplot_by == 'none') return(NULL)
+      
+      
+      req(g_data()$d3())
+      
+      d <- g_data()$d1()
+      g <- g_data()$group()
+      v <- g_data()$d3()[, input$heatmap_subplot_by]
+      
+      cluster_rows <- input$heatmap_cluster_row
+      cluster_cols <- input$heatmap_cluster_col
+      show_rownames <- input$heatmap_show_rownames
+      show_colnames <- input$heatmap_show_colnames
+      fontsize_row <- input$heatmap_fontsize_row
+      fontsize_col <- input$heatmap_fontsize_col
+      font_family <- input$font_family
+      color_palette <- input$heatmap_color_palette
+      if (color_palette == 'navy_white_firebrick3') {
+        color <- colorRampPalette(c("navy", "white", "firebrick3"))(3)
+      } else if (color_palette == 'green_black_red') {
+        color <- colorRampPalette(c("green", "black", "red"))(3)
+      } else {
+        color <- colorRampPalette(rev(RColorBrewer::brewer.pal(n = 7, name =
+  color_palette)))(3)
+      }
+      border_color <- input$heatmap_border_color
+      if (border_color == 'NA') border_color <- NA
+      
+      if (!is.null(input$heatmap_annotate_sample)) {
+        req(g_data()$d2())
+        annotation_sample <- g_data()$d2()[, input$heatmap_annotate_sample,
+                                           drop = F]
+        ## take care of ordered group
+        if (input$group_var %in% input$heatmap_annotate_sample) {
+          annotation_sample[, input$group_var] <- g
+        }
+      } else {
+        annotation_sample <- NULL
+      }
+      
+      if (!is.null(input$heatmap_annotate_variable)) {
+        # annotation_variable <- g_data()$d3()[, input$heatmap_annotate_variable,
+        #                                      drop = F]
+        annotation_variable <- NULL
+      } else {
+        annotation_variable <- NULL
+      }
+      
+
+      
+      p_list <- lapply(unique(v), function(v.i) {
+        ind <- which(v == v.i)
+        if (input$heatmap_rotate) {
+          d0 <- t(d[, ind, drop = F])
+          if (!is.null(annotation_variable))
+            annotation_row_sub <- annotation_variable[ind, ,drop = F]
+          else
+            annotation_row_sub <- NA
+          
+          if (!is.null(annotation_sample))
+            annotation_col_sub <- annotation_sample
+          else
+            annotation_col_sub <- NA
+          
+        } else {
+          d0 <- d[, ind, drop = F]
+          if (!is.null(annotation_sample)) 
+            annotation_row_sub <- annotation_sample
+          else
+            annotation_row_sub <- NA
+          
+          if (!is.null(annotation_variable))
+            annotation_col_sub <- annotation_variable[ind, , drop = F]
+          else
+            annotation_col_sub <- NA
+        }
+        
+
+        
+        scale_rows = function(x){
+          m = apply(x, 1, mean, na.rm = T)
+          s = apply(x, 1, sd, na.rm = T)
+          return((x - m) / s)
+        }
+
+        scale_mat = function(mat, scale){
+          if(!(scale %in% c("none", "row", "column"))){
+              stop("scale argument shoud take values: 'none', 'row' or 'column'")
+          }
+          mat = switch(scale, 
+                       none = mat, 
+                       row = scale_rows(mat), 
+                       column = t(scale_rows(t(mat)))
+                       )
+          return(mat)
+        }
+        
+        d0 <- scale_mat(d0, input$heatmap_scale)
+     
+        scalex <- input$heatmap_scale
+        if (nrow(d0) == 1) {
+          if (scalex == 'column')
+            scalex <- 'none'
+        }
+        if (ncol(d0) == 1) {
+          if (scalex == 'row')
+            scalex <- 'none'
+        }
+        
+        gg_color_hue <- function(n) {
+          hues = seq(15, 375, length = n + 1)
+          hcl(h = hues, l = 65, c = 100)[1: n]
+        }
+      
+      
+        if (identical(annotation_col_sub, NA)){
+          top_annotation <-  NULL
+        } else{
+          ncol_name <- nlevels(factor(annotation_col_sub[, input$heatmap_annotate_sample]))
+          col_name <- levels(factor(annotation_col_sub[, input$heatmap_annotate_sample]))
+          col_cols <- gg_color_hue(ncol_name)
+          top_annotation <-  HeatmapAnnotation(df = annotation_col_sub,
+                                     col = list('Group' = structure(col_cols, 
+                                                                  names = c(col_name)),
+                                                'Order' = structure(col_cols, 
+                                                                  names = c(col_name))
+                                                ),
+                                     annotation_name_gp = gpar(fontface = 'bold',
+                                                               fontfamily = font_family)
+                                     )
+        }
+         
+        if (identical(annotation_row_sub, NA)){
+          left_annotation <-  NULL
+        } else{
+          nrow_name <- nlevels(factor(annotation_row_sub[, input$heatmap_annotate_variable]))
+          row_name <- levels(factor(annotation_row_sub[, input$heatmap_annotate_variable]))
+          row_cols <- gg_color_hue(nrow_name)
+          left_annotation = rowAnnotation(df = annotation_row_sub,
+                                col = list('Class' = structure(row_cols,
+                                                             names = c(row_name)),
+                                           'Class total' = structure(row_cols,
+                                                             names = c(row_name)),
+                                           'Class 1' = structure(row_cols,
+                                                             names = c(row_name)),
+                                           'HMDB link' = structure(row_cols,
+                                                             names = c(row_name)),
+                                           'HMDB ID' = structure(row_cols,
+                                                             names = c(row_name))
+                                           ),
+                                annotation_name_gp = gpar(fontface = 'bold',
+                                                          fontfamily = font_family)
+                                )
+        }      
+
+      ht_opt(
+        legend_title_gp = gpar(fontfamily = font_family),
+        legend_labels_gp = gpar(fontfamily = font_family)
+      )       
+        # pheatmap::pheatmap(
+        #   d0,
+        #   scale = scalex,
+        #   color = color, border_color = border_color,
+        #   cluster_rows = ifelse(nrow(d0) > 2, cluster_rows, F),
+        #   cluster_cols = ifelse(ncol(d0) > 2, cluster_cols, F),
+        #   annotation_row = annotation_row_sub,
+        #   annotation_col = annotation_col_sub,
+        #   show_rownames = show_rownames, show_colnames = show_colnames,
+        #   fontsize_row = fontsize_row, fontsize_col = fontsize_col,
+        #   silent = T,
+        #   main = v.i
+        # )
+        
+      ## ComplexHeatmap
+        ComplexHeatmap::Heatmap(
+          d0,
+          name = 'SD',
+          column_title = v.i,
+          column_title_gp = gpar(fontface = 'bold', fontfamily = font_family), 
+          
+          ## color
+          col = circlize::colorRamp2(breaks = c(min(d0), 0, max(d0)), colors = color),
+          rect_gp = gpar(col = border_color),
+
+          ## cluster
+          cluster_rows = ifelse(nrow(d0) > 2, cluster_rows, F),
+          cluster_columns = ifelse(ncol(d0) > 2, cluster_cols, F),
+
+          ## row_names & fontsize
+          show_row_names = show_rownames,
+          row_names_gp = gpar(fontsize = fontsize_row, fontfamily = font_family),
+
+          ## col_names & fontsize
+          show_column_names = show_colnames,
+          column_names_gp = gpar(fontsize = fontsize_col, fontfamily = font_family),
+          # column_names_rot = 270,
+          # column_names_centered = T, 
+
+          ## legend
+          # heatmap_legend_param = list(legend_height = unit(1, 'in')),
+
+          ## annotation
+          top_annotation = top_annotation,
+          left_annotation = left_annotation
+        )
+      })
+      print('end heatmap subplot')
+      p_list
+    }),
+    
+    oplsda = reactive({
+      req(T)
+      req(g_data()$d1())
+      req(g_data()$group())
+
+      print('oplsda')
+      
+
+      ## scale data first to avoid removal of low-variance variables
+      ## variance < 2.2e-16
+      d <- scale(g_data()$d1(), center = T, scale = T)
+      ## remove columns with NA
+      d <- d[, apply(d, 2, function(x) {!any(is.na(x))})]
+      g <- g_data()$group()
+      
+      validate(
+        need(ncol(d) > 1, 'At least 2 columns are needed for OPLSDA')
+      )
+            
+      if (nlevels(g) == 1) {
+        pls_list <- list()
+      } else if (nlevels(g) > 2) {
+        pls_list <- apply(
+          combn(levels(g), 2), 2, function(x) {
+            ## sample index
+            ind <- which(g %in% x)
+            d_ind <- d[ind, ]
+            g_ind <- g[ind, drop = T]
+            
+            pls <- tryCatch(
+              ropls::opls(
+                d_ind, g_ind,
+                predI = 1, orthoI = NA, fig.pdfC = 'none',
+                crossvalI = min(7, nrow(d_ind))
+              ),
+              error = function(e) {
+                print(e)
+                tryCatch(
+                  ropls::opls(
+                    d_ind, g_ind,
+                    predI = 1, orthoI = 0, fig.pdfC = 'none',
+                    crossvalI = min(7, nrow(d_ind))
+                  ),
+                  error = function(e) {
+                    print(e)
+                  }
+                )
+              }
+            )
+          })
+      } else if (nlevels(g) == 2) {
+        pls <- tryCatch(
+          ropls::opls(
+            d, g,
+            predI = 1, orthoI = NA, fig.pdfC = 'none',
+            crossvalI = min(7, nrow(d))
+          ),
+          error = function(e) {
+            print(e)
+            tryCatch(
+              ropls::opls(
+                d, g,
+                predI = 1, orthoI = 0, fig.pdfC = 'none',
+                crossvalI = min(7, nrow(d))
+              ),
+              error = function(e) {
+                print(e)
+              }
+            )
+          }
+        )
+        pls_list <- list(pls)
+      }
+      else
+        pls_list <- list()
+      print('end oplsda')
+      ## remove NULL from list
+      Filter(Negate(is.null), pls_list)
+    }),
+    
+    oplsda_text = reactive({
+      req(T)
+      req(g_data()$oplsda())
+
+      print('oplsda text')
+      
+      oplsda_list <- g_data()$oplsda()
+      
+      if(length(oplsda_list) > 0) {
+        txt_list <- lapply(oplsda_list, function(oplsda) {
+          auc <- pROC::roc(attr(oplsda, 'suppLs')$y,
+                      attr(oplsda, 'scoreMN')[, 1])
+          
+          overfit <- ifelse(
+            oplsda@summaryDF$pR2Y <= 0.05 & oplsda@summaryDF$pQ2 <= 0.05,
+            FALSE, TRUE
+          )
+          
+          res <- ifelse(
+            auc$auc > 0.8, '较好', '不好'
+          )
+          
+          txt <- paste0(
+            sprintf('%s-%s两组之间的区分%s, AUC=%.2f。', 
+                    auc$levels[1], auc$levels[2],
+                    res, auc$auc),
+            sprintf(
+              '模型%s过拟合的迹象（pR2Y=%.2f, pQ2=%.2f）。',
+              ifelse(overfit, '有', '没有'),
+              oplsda@summaryDF$pR2Y, oplsda@summaryDF$pQ2
+            )
+          )
+          
+        })
+      } else {
+        'OPLSDA模型没有结果。'
+      }
+      
+      paste0(txt_list, collapse = '\n')
+    }),
+    
+    hypothesis_test_adjusted = reactive({
+      req(T)
+      ## perform both parametric and nonparametric tests
+      req(input$pair_var)
+      req(input$group_var)
+      req(input$padjust)
+      req(g_data()$d1())
+      req(g_data()$group())
+      print('hypothesis test')
+      ## Calculate fold change
+      
+      d1 <- g_data()$d1()
+      g <- g_data()$group()
+      method <- input$padjust
+
+      if (input$pair_var == 'None') {
+        pair <- NA
+      } else {
+        pair <- as.factor(g_data()$pair())
+      }
+      
+      test_result <- hypothesisTest(d1, g, pair, method)
+      
+      print('end hypothesis test')
+      test_result
+    }),
+  
+    hypothesis_test = reactive({
+      req(g_data()$hypothesis_test_adjusted())
+      req(input$padjust)
+      
+      method <- input$padjust
+      hypothesis_test_adjusted <- g_data()$hypothesis_test_adjusted()
+      
+      if (method == 'none') {
+        hypothesis_test_adjusted$unadjusted
+      } else {
+        hypothesis_test_adjusted$adjusted
+      }
+    }),
+    
+    volcano = reactive({
+      req(T)
+      req(g_data()$hypothesis_test())
+      
+      print('volcano')
+      
+      d.ht <- g_data()$hypothesis_test()
+      g <- g_data()$group()
+      sig_lvl <- as.numeric(input$volcano_sig_lvl)
+      fold_cutoff <- as.numeric(input$volcano_fold_cutoff)
+      volcano_p <- input$volcano_p
+      max_label <- input$volcano_max_label
+      ggtheme <- g_data()$ggtheme()
+      font_family <- input$font_family
+      force <- input$volcano_force
+      expand <- input$volcano_expand
+      min_segment_length <- input$volcano_min_segment_length
+      
+      if (nlevels(g) == 1) return(list())
+      
+      if (nlevels(g) > 2) {
+        ## choose P value type in volcano plot
+        # req(input$volcano_p)
+        
+        
+        ## only look at combination containing base level
+        combs <- as.data.frame(combn(levels(g), 2))
+        # combs <- combs[stringr::str_detect(
+        #     combs, paste0('^', Hmisc::escapeRegex(base_lvl), ':|:', 
+        #                   Hmisc::escapeRegex(base_lvl), '$'))
+        #     ]
+        
+        p_list <- lapply(combs, function(x) {
+          print(x)
+          d <- d.ht[, c(paste0(volcano_p, ': ', paste0(rev(x), collapse = ':')), 
+                        paste0('Fold: ', x[2], '/', x[1])), drop = F] %>%
+            data.frame(check.names = F)
+          
+          d[, 'label'] <- rownames(d.ht)
+          
+          plot_volcano(d, sig_lvl, fold_cutoff, max_label, 
+                       title = paste0(x[2], '/', x[1]), 
+                       ggtheme, font_family = font_family,
+                       force = force,
+                       expand = expand,
+                       min.segment.length = min_segment_length)
+        })
+        
+        ## for making plot filename
+        names(p_list) <- apply(combs, 2, function(x) {paste0(rev(x), collapse = '_')})
+      } else {
+        p_col <- ifelse(volcano_p == 'Parametric', 'parametric pvalue', 'non-parametric pvalue')
+        d <- d.ht[, c(p_col, paste0('Fold: ', levels(g)[2], '/', levels(g)[1])), drop = F] %>%
+          data.frame
+        
+        d[, 'label'] <- rownames(d.ht)
+        
+        p_list <- list(plot_volcano(d, sig_lvl, fold_cutoff, max_label, 
+                                    title = paste0(levels(g)[2], '/', levels(g)[1]),
+                                    ggtheme = ggtheme,
+                                    font_family = font_family,
+                                    force = force,
+                                    expand = expand,
+                                    min.segment.length = min_segment_length
+        ))
+      }
+      print('end volcano')
+      p_list
+    }),
+    
+    volcano_text = reactive({
+      req(T)
+      req(g_data()$hypothesis_test())
+
+      print('volcano text')
+      
+      d.ht <- g_data()$hypothesis_test()
+      g <- g_data()$group()
+      sig_lvl <- as.numeric(input$volcano_sig_lvl)
+      fold_cutoff <- as.numeric(input$volcano_fold_cutoff)
+      volcano_p <- input$volcano_p
+      max_label <- input$volcano_max_label
+      
+      if (nlevels(g) == 1) return(list())
+      
+      if (nlevels(g) > 2) {
+        ## choose P value type in volcano plot
+        # req(input$volcano_p)
+        
+        
+        ## only look at combination containing base level
+        combs <- as.data.frame(combn(levels(g), 2))
+        # combs <- combs[stringr::str_detect(
+        #     combs, paste0('^', Hmisc::escapeRegex(base_lvl), ':|:', 
+        #                   Hmisc::escapeRegex(base_lvl), '$'))
+        #     ]
+        
+        txt_list <- lapply(combs, function(x) {
+          d <- d.ht[, c(paste0(volcano_p, ': ', paste0(rev(x), collapse = ':')), 
+                        paste0('Fold: ', x[2], '/', x[1])), drop = F] %>% data.frame(check.names = F)
+          d[, 'label'] <- rownames(d.ht)
+          
+          out <- volcanoText(d, sig_lvl, fold_cutoff, max_label)
+          
+          txt_up <- ifelse(length(out$up) > 0,
+                           paste0(paste0(out$up, collapse = '，'), 
+                                  '是显著上调的脂质/代谢物。'),
+                           '')
+          
+          txt_down <- ifelse(length(out$down) > 0,
+                           paste0(paste0(out$down, collapse = '，'), 
+                                  '是显著下调的脂质/代谢物。'),
+                           '')
+          
+          sprintf('%s/%s中, %s', 
+                  x[2], x[1],
+                  ifelse(length(out$up) == 0 & length(out$down) == 0,
+                         ifelse(max_label == 0, 
+                                '图中没有标注差异代谢物。',
+                                '没有有显著差异的脂质/代谢物。'), 
+                         paste0(txt_up, txt_down)))
+        })
+        
+        res <- paste0(txt_list, collapse = '\n\n')
+      } else {
+        p_col <- ifelse(volcano_p == 'Parametric', 'parametric pvalue', 'non-parametric pvalue')
+        d <- d.ht[, c(p_col, paste0('Fold: ', levels(g)[2], '/', levels(g)[1])), drop =F] %>%
+          data.frame
+        
+        d[, 'label'] <- rownames(d.ht)
+       
+        out <- volcanoText(d, sig_lvl, fold_cutoff, max_label)
+        
+        txt_up <- ifelse(length(out$up) > 0,
+                           paste0(paste0(out$up, collapse = '，'), 
+                                  '是显著上调的脂质/代谢物。'),
+                         '')
+        
+        txt_down <- ifelse(length(out$down) > 0,
+                           paste0(paste0(out$down, collapse = '，'), 
+                                  '是显著下调的脂质/代谢物。'),
+                           '')
+          
+        res <- sprintf('%s/%s中, %s', 
+                       levels(g)[2], levels(g)[1],
+                       ifelse(length(out$up) == 0 & length(out$down) == 0,
+                              ifelse(max_label == 0, 
+                                     '图中没有标注差异代谢物。',
+                                     '没有有显著差异的脂质/代谢物。'), 
+                              paste0(txt_up, txt_down)))
+      }
+      
+      res
+    }),
+    
+    differential_metabolites_text = reactive({
+      req(T)
+      req(g_data()$hypothesis_test())
+      print('Differential metabolites text')
+      
+      d.ht <- g_data()$hypothesis_test()
+      g <- g_data()$group()
+      sig_lvl <- as.numeric(input$differential_metabolites_sig_lvl)
+      fold_cutoff <- as.numeric(input$differential_metabolites_fold_cutoff)
+      volcano_p <- input$differential_metabolites_p
+      max_label <- input$differential_metabolites_max_label
+      
+      if (nlevels(g) == 1) return('只有1个组，不能进行比较。')
+      
+      if (nlevels(g) > 2) {
+        ## choose P value type in volcano plot
+        # req(input$volcano_p)
+        
+        ## only look at combination containing base level
+        combs <- as.data.frame(combn(levels(g), 2))
+        # combs <- combs[stringr::str_detect(
+        #     combs, paste0('^', Hmisc::escapeRegex(base_lvl), ':|:', 
+        #                   Hmisc::escapeRegex(base_lvl), '$'))
+        #     ]
+        
+        txt_list <- lapply(combs, function(x) {
+          d <- d.ht[, c(paste0(volcano_p, ': ', paste0(rev(x), collapse = ':')), 
+                        paste0('Fold: ', x[2], '/', x[1])),
+                    drop = F] %>% 
+            data.frame(check.names = F)
+          d[, 'label'] <- rownames(d.ht)
+          
+          out <- differentialMetabolitesText(d, sig_lvl, fold_cutoff, max_label)
+          
+          txt_up <- ifelse(length(out$up) > 0,
+                           paste0(paste0(out$up, collapse = '，'), 
+                                  '是显著上调的脂质/代谢物。'),
+                           '')
+          
+          txt_down <- ifelse(length(out$down) > 0,
+                             paste0(paste0(out$down, collapse = '，'), 
+                                    '是显著下调的脂质/代谢物。'),
+                             '')
+          
+          sprintf('%s与%s相比，%s是P值最小的前%d个脂质/代谢物。%s', 
+                  x[2], x[1],
+                  paste0(out$all, collapse = '，'),
+                  max_label,
+                  ifelse(length(out$up) == 0 & length(out$down) == 0,
+                         '没有有显著差异的脂质/代谢物。', 
+                         paste0(txt_up, txt_down)))
+        })
+        
+        res <- paste0(txt_list, collapse = '\n\n')
+      } else {
+        p_col <- ifelse(volcano_p == 'Parametric', 'parametric pvalue', 'non-parametric pvalue')
+        d <- d.ht[, c(p_col, paste0('Fold: ', levels(g)[2], '/', levels(g)[1])), drop = F] %>%
+          data.frame
+        
+        d[, 'label'] <- rownames(d.ht)
+        
+        out <- differentialMetabolitesText(d, sig_lvl, fold_cutoff, max_label)
+        
+        txt_up <- ifelse(length(out$up) > 0,
+                         paste0(paste0(out$up, collapse = '，'), 
+                                '是显著上调的脂质/代谢物。'),
+                         '')
+        
+        txt_down <- ifelse(length(out$down) > 0,
+                           paste0(paste0(out$down, collapse = '，'), 
+                                  '是显著下调的脂质/代谢物。'),
+                           '')
+        
+        res <- sprintf('%s/%s中，%s是P值最小的前%d个脂质/代谢物。%s', 
+                       levels(g)[2], levels(g)[1],
+                       paste0(out$all, collapse = '，'),
+                       max_label,
+                       ifelse(length(out$up) == 0 & length(out$down) == 0,
+                              '没有有显著差异的脂质/代谢物。', 
+                              paste0(txt_up, txt_down)))
+      }
+    
+      res
+        
+    }),
+    
+    boxplot = reactive({
+      req(T)
+      req(g_data()$d1())
+      req(g_data()$group())
+      req(g_data()$hypothesis_test())
+      req(g_data()$boxplot_shown_id())
+      
+      print('boxplot')
+
+      if (input$pair_var == 'None') {
+        pair <- NA
+      } else {
+        pair <- as.factor(g_data()$pair())
+      }
+
+      ## add jitter
+      add_jitter <- input$boxplot_add_jitter
+      ## add point
+      add_point <- input$boxplot_add_point
+      ## show significance
+      add_sig <- input$boxplot_add_sig
+      ## show violin
+      add_violin <- input$boxplot_add_violin
+      ## notch
+      notch <- input$boxplot_notch
+      ## x label angle
+      x_angle <- input$boxplot_x_angle
+      h_just <- input$boxplot_hjust
+      v_just <- input$boxplot_vjust
+      ## unit
+      unit <- input$unit
+      ## ggplot theme
+      ggtheme <- g_data()$ggtheme()
+      font_family <- input$font_family
+      
+      id <- g_data()$boxplot_shown_id()
+      d <- g_data()$d1()[, id, drop = F]
+      g <- g_data()$group()
+      dh <- g_data()$hypothesis_test()[id, , drop = F]
+      
+      posthoc <- NULL
+      if (add_sig) {
+        req(input$boxplot_posthoc)
+        posthoc <- input$boxplot_posthoc
+      }
+      
+      p_list <- batch_boxplot(d, g, dh, pair, 
+                              posthoc = posthoc, unit = unit, 
+                              add_point = add_point, add_sig = add_sig, 
+                              add_violin = add_violin, add_jitter = add_jitter,
+                              notch, x_angle, h_just, v_just,
+                              ggtheme = ggtheme, font_family = font_family)
+      print('end boxplot')
+      p_list
+    }),
+    
+    ## save only shown boxplot to RData
+    boxplot_shown_id = reactive({
+      req(T)
+      req(input$boxplot_top_n)
+      req(input$boxplot_top_n_by)
+      print('boxplot shown id')
+      dh <- g_data()$hypothesis_test()
+      top_n <- input$boxplot_top_n
+      top_n_by <- input$boxplot_top_n_by
+      
+      p_rank <- order(dh[, top_n_by])
+      print('end boxplot shown id')
+      ## ID of plots to show
+      p_rank[1:top_n]
+    }),
+    
+    boxplot_text = reactive({
+      req(T)
+      req(g_data()$boxplot_shown_id())
+
+      dh <- g_data()$hypothesis_test()
+      id <- g_data()$boxplot_shown_id()
+      
+      sprintf(
+        '%s是组间差异最显著（%s P值最小）的前%s个脂质/代谢物。',
+        paste0(rownames(dh)[id], collapse = '，'),
+        switch (input$boxplot_posthoc,
+          TukeyHSD = 'Welch’s ANOVA',
+         ` Games-Howell` = 'Welch’s ANOVA',
+          Dunn = "Kruskal-Wallis test",
+          Parametric = ifelse(
+           input$pair_var == 'None',
+            't-test',
+            'paired t-test'
+    ),
+          `Non-parametric` = ifelse(
+            input$pair_var == 'None',
+            'Mann-Whitney U test',
+            'Wilcoxon signed rank test'
+    )
+        ),
+        length(id)
+      )
+    }),
+    
+    barplot = reactive({
+      req(T)
+      req(g_data()$d1())
+      req(g_data()$group())
+      req(g_data()$hypothesis_test())
+      req(g_data()$barplot_shown_id())
+      
+      print('barplot')
+      
+      if (input$pair_var == 'None') {
+        pair <- NA
+      } else {
+        pair <- as.factor(g_data()$pair())
+      }
+      
+      ## show jitter
+      add_jitter <- input$barplot_add_jitter
+      ## show point
+      add_point <- input$barplot_add_point
+      ## show significance
+      add_sig <- input$barplot_add_sig
+      ## x label angle
+      x_angle <- input$barplot_x_angle
+      h_just <- input$barplot_hjust
+      v_just <- input$barplot_vjust
+      ## unit
+      unit <- input$unit
+      ## confidence level
+      conf.int <- input$barplot_ci
+      
+      ## ggplot theme
+      ggtheme <- g_data()$ggtheme()
+      
+      font_family <- input$font_family
+      
+      id <- g_data()$barplot_shown_id()
+      d <- g_data()$d1()[, id, drop = F]
+      g <- g_data()$group()
+      dh <- g_data()$hypothesis_test()[id, , drop = F]
+      
+      posthoc <- NULL
+      if (add_sig) {
+        req(input$barplot_posthoc)
+        posthoc <- input$barplot_posthoc
+      }
+      
+      p_list <- batch_barplot(d, g, dh, pair,
+                              posthoc = posthoc, unit = unit, 
+                              add_point = add_point, add_sig = add_sig, 
+                              add_jitter = add_jitter,
+                              x_angle, h_just, v_just, 
+                              as.numeric(conf.int),
+                              ggtheme = ggtheme, font_family = font_family)
+      
+      print('end barplot')
+      p_list
+    }),
+    
+    ## save only shown barplot to RData
+    barplot_shown_id = reactive({
+      req(T)
+      req(input$barplot_top_n)
+      req(input$barplot_top_n_by)
+      print('barplot shown id')
+      dh <- g_data()$hypothesis_test()
+      top_n <- input$barplot_top_n
+      top_n_by <- input$barplot_top_n_by
+      
+      p_rank <- order(dh[, top_n_by])
+      print('end barplot shown id')
+      ## ID of plots to show
+      p_rank[1:top_n]
+    }),
+    
+    barplot_text = reactive({
+      req(T)
+      req(g_data()$barplot_shown_id())
+      
+      dh <- g_data()$hypothesis_test()
+      id <- g_data()$barplot_shown_id()
+      
+      sprintf(
+        '%s是组间差异最显著（%s P值最小）的前%s个脂质/代谢物。',
+        paste0(rownames(dh)[id], collapse = '，'),
+         switch (input$boxplot_posthoc,
+          TukeyHSD = 'Welch’s ANOVA',
+          `Games-Howell` = 'Welch’s ANOVA',
+          Dunn = 'Kruskal-Wallis test',
+          Parametric = ifelse(
+           input$pair_var == 'None',
+            't-test',
+            'paired t-test'
+    ),
+          `Non-parametric` = ifelse(
+            input$pair_var == 'None',
+            'Mann-Whitney U test',
+            'Wilcoxon signed rank test'
+    )
+        ),
+        length(id)
+      )
+    })
+  )
+})
+```
+
+```{r graph_settings}
+output$font_family_ui <- renderUI({
+  fonts <- intersect(c("Liberation Sans", "Liberation Serif", 
+                       "Arial", "Times New Roman",
+                       "WenQuanYi Zen Hei"),
+                     fonts())
+  
+  selectInput('font_family', 'Font family',
+              choices = fonts, selected = fonts[1])
+})
+
+output$dpi_ui <- renderUI({
+  ## selectInput always returns character even if choices are numeric
+  selectInput('dpi', 'Image resolution in dpi',
+              choices = c('100', '300'), selected = '300')
+})
+
+output$image_format_ui <- renderUI({
+  selectInput('image_format', 'Export image format',
+              choices = c('none', 'png', 'tiff'), selected = 'tiff')
+})
+
+
+output$unit_ui <- renderUI({
+  req(input$file3)
+  # somehow commenting the above line make input$file3 optional,
+  # otherwise error will be raised when accessing d3
+  print('unit ui')
+  
+  encoding <- ifelse(input$file_utf8, 'UTF-8', '')
+  d1 <- tryCatch(
+    {
+      read.csv(input$file1$datapath,
+               header = F,
+               sep = input$sep1, check.names = F, 
+               quote = input$quote1, strip.white = T,
+               fileEncoding = encoding)
+    },
+    error = function(e) {
+      # return a safeError if a parsing error occurs
+      stop(safeError(e))
+      NULL
+    }
+  )
+  
+  choices <- c('blank' = ' ',
+              'mols' = 'mols', 
+              'mol/g' = 'mol/g', 
+              'mol/mg' = 'mol/mg',
+              'mol/L' = 'mol/L', 
+              'μmoles' = 'mu*moles', 
+              'μmol/g' = 'mu*mol/g',  
+              'μmol/mg' = 'mu*mol/mg', 
+              'μmols/mg protein' = 'mu*mols/mg~protein',
+              'moles/g protein' = 'moles/g~protein', 
+              'μmol/cell' = 'mu*mol/cell', 
+              'μmol/cm2' = 'mu*mol/cm^2', 
+              'μmol/OD' = 'mu*mol/OD', 
+              'μg/g' = 'mu*g/g', 
+              'MFP' = 'MFP', 
+              'MFP to total PL+SPL+Cho' = 'MFP~to~total~PL+SPL+Cho', 
+              'peak area' = 'peak~area', 
+              'labeling fraction' = 'labeling~fraction',
+              'isotopic abundance ratio' = 'isotopic~abundance~ratio')
+  
+  cell11 <- stringr::str_trim(d1[1, 1])
+  
+  if (cell11 %in% names(choices)) {
+    selected <- choices[which(names(choices) == cell11)]
+  } else {
+    unit.type <- stringr::str_replace_all(cell11, ' ', '~')
+    choices <- c(structure(unit.type, names = cell11), choices)
+    selected <- choices[1]
+  }
+  
+  
+  selectInput('unit', 'Unit of measured metabolites',
+              choices = choices, selected = selected)
+})
+```
+
+```{r load_files}
+## check data.csv and sample.csv have the same rownames
+observe({
+  req(g_data()$d0())
+  req(g_data()$d2_raw())
+  print('observe: check data.csv and sample.csv rownames')
+  rn1 <- rownames(g_data()$d0())
+  rn2 <- rownames(g_data()$d2_raw())
+
+  if(all(rn1 == rn2)) {
+
+  } else {
+    showModal(modalDialog(
+      title = "Different rownames in data file and sample file",
+      'Rownames of data file and sample file are not the same',
+      easyClose = TRUE
+    ))
+    Sys.sleep(5)
+  }
+  print('end observe: check data.csv and sample.csv rownames')
+})
+
+observe({
+  req(g_data()$d0())
+  req(g_data()$d3())
+  print('observe: check data.csv and var.csv rownames')
+  rn1 <- colnames(g_data()$d0())
+  rn2 <- rownames(g_data()$d3())
+
+  if(all(rn1 == rn2)) {
+
+  } else {
+    showModal(modalDialog(
+      title = "Different rownames in data file and var file",
+      'Colnames of data file and rownames of var file are not the same',
+      easyClose = TRUE
+    ))
+    Sys.sleep(5)
+  }
+  print('end observe: check data.csv and var.csv rownames')
+})
+
+output$tbl1_raw <- renderDT({
+  req(g_data()$d0())
+  
+  # data preview
+  if(input$disp1 == "head") {
+    datatable(head(g_data()$d0()), 
+              extensions = 'FixedColumns',
+              options = list(scrollX = T,
+                             fixedColumns = T))
+  }
+  else {
+    datatable(g_data()$d0(), 
+              extensions = 'FixedColumns',
+              options = list(scrollX = T,
+                             fixedColumns = T))
+  }
+})
+
+output$tbl1 <- renderDT({
+  # data preview
+  if(input$disp1 == "head") {
+    datatable(head(g_data()$d1()), 
+              extensions = 'FixedColumns',
+              options = list(scrollX = T,
+                             fixedColumns = T))
+  }
+  else {
+    datatable(g_data()$d1(), 
+              extensions = 'FixedColumns',
+              options = list(scrollX = T,
+                             fixedColumns = T))
+  }
+})
+
+output$summary1 <- renderDT({
+  req(g_data()$summary1())
+  
+  summary1 <- g_data()$summary1()
+  
+  datatable(summary1,
+            extensions = 'FixedColumns',
+            options = list(scrollX = T,
+                           fixedColumns = T))
+})
+
+output$tbl2_raw <- renderDT({
+  # data preview
+  if(input$disp2 == "head") {
+    datatable(head(g_data()$d2_raw()), 
+              extensions = 'FixedColumns',
+              options = list(scrollX = T,
+                             fixedColumns = T))
+  }
+  else {
+    datatable(g_data()$d2_raw(), 
+              extensions = 'FixedColumns',
+              options = list(scrollX = T,
+                             fixedColumns = T))
+  }
+})
+
+output$tbl2 <- renderDT({
+  # data preview
+  if(input$disp2 == "head") {
+    datatable(head(g_data()$d2()), 
+              extensions = 'FixedColumns',
+              options = list(scrollX = T,
+                             fixedColumns = T))
+  }
+  else {
+    datatable(g_data()$d2(), 
+              extensions = 'FixedColumns',
+              options = list(scrollX = T,
+                             fixedColumns = T))
+  }
+})
+
+output$summary2 <- renderTable({
+  d <- g_data()$d2()
+  vars <- colnames(d)
+  
+  tableone::CreateTableOne(vars, data = d) %>% print
+}, rownames = T, colnames = T)
+
+## select group variable
+output$group_var_ui <- renderUI({
+  req(g_data()$d2_raw())
+  
+  vars <- colnames(g_data()$d2_raw())
+  
+  selectInput('group_var', 'Group variable',
+              choices = vars)
+})
+
+## select groups to include
+output$group_select_ui <- renderUI({
+  req(input$file2)
+  req(g_data()$group0())
+  
+  g <- g_data()$group0()
+  vars <- unique(g)
+  
+  selectInput('groups_selected', 'Select groups to include',
+              choices = vars, multiple = T, selected = vars)
+  
+})
+
+## select 
+output$group_order_var_ui <- renderUI({
+  # req(input$file2)
+  req(g_data()$group0())
+  g <- g_data()$group0()
+  d <- g_data()$d2_raw()
+  
+  vars <- colnames(d)[
+    apply(d, 2, function(x) {
+      ## non-missing and not spaces
+      xx <- (!is.na(x)) & (stringr::str_trim(x) != '')
+      gg <- g[xx]
+      x <- x[xx]
+      
+      ## non missing value
+      ifelse(nlevels(g) == length(unique(x)) &
+               length(unique(paste0(gg, x))) == nlevels(g),
+             TRUE, FALSE)
+    })
+    ]
+  vars <- setdiff(c('None', vars), input$group_var)
+  
+  selected <- ifelse('Order' %in% vars, 'Order', vars[1])
+  
+  selectInput('group_order_var', 'Group order variable', 
+              choices = vars, selected = selected)
+})
+
+## select pair variable
+output$pair_var_ui <- renderUI({
+  req(g_data()$d2())
+  req(g_data()$group())
+  # req(input$file2)
+  g <- g_data()$group()
+  d <- g_data()$d2()
+  
+  ## each pair ID must appear exactly twice
+  ## each pair ID must appear exactly once in each group
+  if (nlevels(g) == 2)
+  {
+    vars <- colnames(d)[
+      apply(d, 2, function(x) {
+        if (all(table(x) == 2) & 
+            all(table(x[g == levels(g)[1]]) == 1) &
+            all(table(x[g == levels(g)[2]]) == 1))
+          TRUE
+        else
+          FALSE
+      })
+      ]
+    vars <- c('None', vars)
+  } else {
+    vars <- 'None'
+  }
+  
+  selected <- ifelse('Pair' %in% vars, 'Pair', vars[1])
+  
+  selectInput('pair_var', 'Pair variable (affects hypothesis testing)',
+              choices = vars, selected = 'None')
+})
+
+
+
+output$tbl3 <- renderDT({
+  # data preview
+  if(input$disp3 == "head") {
+    datatable(head(g_data()$d3()), 
+              extensions = 'FixedColumns',
+              options = list(scrollX = T,
+                             fixedColumns = T))
+  }
+  else {
+    datatable(g_data()$d3(), 
+              extensions = 'FixedColumns',
+              options = list(scrollX = T,
+                             fixedColumns = T))
+  }
+})
+
+output$summary3 <- renderTable({
+  d <- g_data()$d3()
+  vars <- colnames(d)
+  
+  tableone::CreateTableOne(vars, data = d) %>% print
+}, rownames = T, colnames = T)
+
+
+exportDataCSV <- function() {
+  req(g_data()$d1())
+  req(g_data()$d2())
+  req(g_data()$d3())
+  
+  print('exportDataCSV')
+  
+  encoding <- ifelse(input$file_utf8, 'UTF-8', '')
+  filename_data <- file.path(tmp_report_dir, 'data.csv')
+  filename_sample <- file.path(tmp_report_dir, 'sample.csv')
+  filename_var <- file.path(tmp_report_dir, 'var.csv')
+  
+  ## data
+  d1 <- g_data()$d1()
+  ## sample
+  d2 <- g_data()$d2()
+  ## var
+  d3 <- g_data()$d3()
+  
+  withProgress({
+    tryCatch(
+      {
+        if (input$outfile_utf8_bom) {
+          tmp <- cbind(rname = rownames(d1), d1)
+          readr::write_excel_csv(tmp, filename_data)
+          rm(tmp)
+        } else {
+          write.csv(d1, file = filename_data, fileEncoding = encoding)
+        }
+        
+        incProgress(1/3, detail = 'Exported data.csv')
+        
+        if (input$outfile_utf8_bom) {
+          tmp <- cbind(rname = rownames(d2), d2)
+          readr::write_excel_csv(tmp, filename_sample)
+          rm(tmp)
+        } else {
+          write.csv(d2, file = filename_sample, fileEncoding = encoding)
+        }
+        
+        
+        incProgress(1/3, detail = 'Exported sample.csv')
+        
+        if (input$outfile_utf8_bom) {
+          tmp <- cbind(rname = rownames(d3), d3)
+          readr::write_excel_csv(tmp, filename_var)
+          rm(tmp)
+        } else {
+          write.csv(d3, file = filename_var, fileEncoding = encoding)
+        }
+        
+        incProgress(1/3, detail = 'Exported var.csv')
+      },
+      error = function(e) {
+        print(e$message)
+      },
+      finally = function() {
+        print('End exportDataCSV')
+      }
+    )
+  }, value = 0, message = 'Export csv files')
+  
+}
+```
+
+```{r metabolites_statistics}
+output$metabolites_statistics_width_ui <- renderUI({
+  req(input$dpi)
+  ## multiplicative factor
+  mult <- as.numeric(input$dpi) / 100
+  
+  min.val <- 300 * mult
+  max.val <- 1600 * mult
+  val <- 600 * mult
+  
+  sliderInput('metabolites_statistics_width', 'Figure width (px)',
+              min.val, max.val, val, 10)
+})
+
+output$metabolites_statistics_height_ui <- renderUI({
+  req(input$dpi)
+  ## multiplicative factor
+  mult <- as.numeric(input$dpi) / 100
+  
+  min.val <- 300 * mult
+  max.val <- 1600 * mult
+  val <- 400 * mult
+  
+  sliderInput('metabolites_statistics_height', 'Figure height (px)',
+              min.val, max.val, val, 10)
+})
+
+output$metabolites_statistics_ui <- renderUI({
+  req(g_data()$metabolites_statistics())
+  
+  print('plot metabolites statistics')
+  
+  p <- g_data()$metabolites_statistics()
+  
+  p_list <- list(renderPlot({
+    p
+  },
+  res = as.numeric(input$dpi),
+  width = input$metabolites_statistics_width,
+  height = input$metabolites_statistics_height
+  ))
+})
+
+metabolitesStatisticsSaveHandler <- function() {
+  req(g_data()$metabolites_statistics())
+  
+  print('save metabolites statistics')
+  
+  p <- g_data()$metabolites_statistics()
+  dpi <- as.numeric(input$dpi)
+  
+  w <- input$metabolites_statistics_width / dpi
+  h <- input$metabolites_statistics_height / dpi
+  image_format <- input$image_format
+  
+  ## tmp_report_dir is global variable
+  output_dir <- file.path(tmp_report_dir, my_options$summary_dir)
+  if(!dir.exists(output_dir)) {
+    dir.create(output_dir, recursive = T)
+  }
+  
+  filename_pdf <- file.path(output_dir,
+                            paste0(my_options$ome_summary_prefix, '_1.pdf'))
+  filename_png <- file.path(output_dir,
+                            paste0(my_options$ome_summary_prefix, '_1.png'))
+  filename_tiff <- file.path(output_dir,
+                             paste0(my_options$ome_summary_prefix, '_1.tiff'))
+  
+  
+  withProgress({
+    
+    for (i in 1:1) {
+      ggsave(filename_pdf, p, 
+             device = cairo_pdf, onefile = T,
+             width = w, height= h, units = 'in')
+      if (image_format == 'png') {
+        ggsave(filename_png, p, 
+               device = 'png', dpi = dpi,
+               width = w, height= h, units = 'in')
+      } else if (image_format == 'tiff') {
+        ggsave(filename_tiff, p, 
+               device = 'tiff', dpi = dpi,
+               width = w, height= h, units = 'in',
+               compression = 'lzw+p')
+      }
+      
+      # Increment the progress bar, and update the detail text.
+      incProgress(1, detail = paste("Plotting metabolites statistics plot", i))
+    }
+    
+    # dev.off()
+  }, value = 0, message = 'Saving metabolits statistics plot')
+  
+  return()
+}
+
+
+metabolitse_statistics_save <- observeEvent(input$metabolites_statistics_button, {
+  metabolitesStatisticsSaveHandler()
+})
+
+
+metabolitesStatisticsCSVHandler <- function() {
+  req(g_data()$summary1())
+  
+  output_dir <- file.path(tmp_report_dir, my_options$summary_dir)
+  
+  if(!dir.exists(output_dir)) {
+    dir.create(output_dir, recursive = T)
+  }
+  filename <- file.path(output_dir, 'summary1.csv')
+  encoding <- ifelse(input$file_utf8, 'UTF-8', '')
+  
+  outfile_utf8_bom <- input$outfile_utf8_bom
+  summary1 <- g_data()$summary1()
+  
+  
+  if (outfile_utf8_bom) {
+    tmp <- data.frame(rname = rownames(summary1), summary1,
+                      check.names = F)
+    readr::write_excel_csv(tmp, filename)
+    rm(tmp)
+  } else {
+    write.csv(summary1,
+              file = filename,
+              row.names = T, fileEncoding = encoding)
+  }
+  
+  invisible()
+}
+```
+
+```{r ome_summary}
+#-----------------------------------
+# 2.0 ome summary
+#-----------------------------------
+output$ome_type_ui <- renderUI({
+  req(input$file3)
+  # somehow commenting the above line make input$file3 optional,
+  # otherwise error will be raised when accessing d3
+  print('ome type ui')
+  
+  encoding <- ifelse(input$file_utf8, 'UTF-8', '')
+  d3 <- tryCatch(
+    {
+      read.csv(input$file3$datapath,
+               header = input$header3,
+               sep = input$sep3, check.names = F, row.names = NULL,
+               quote = input$quote3, strip.white = T,
+               fileEncoding = encoding)
+    },
+    error = function(e) {
+      # return a safeError if a parsing error occurs
+      stop(safeError(e))
+      NULL
+    }
+  )
+  
+  ## colnames(d3)[1] cannot be "" which cause req to throw error
+  if (stringr::str_trim(colnames(d3)[1]) == '') {
+    selectInput('ome', 'Type of ome data', 
+                c('Lipidome', 'Metabolome'))
+  } else {
+    selectInput('ome', 'Type of ome data', 
+                unique(c(colnames(d3)[1], 'Lipidome', 'Metabolome')))
+  }
+  
+})
+
+output$ome_summary_width_ui <- renderUI({
+  req(input$dpi)
+  ## multiplicative factor
+  mult <- as.numeric(input$dpi) / 100
+  
+  min.val <- 300 * mult
+  max.val <- 3200 * mult
+  val <- 700 * mult
+  
+  sliderInput('ome_summary_width', 'Figure width (px)',
+              min.val, max.val, val, 10)
+})
+
+output$ome_summary_height_ui <- renderUI({
+  req(input$dpi)
+  ## multiplicative factor
+  mult <- as.numeric(input$dpi) / 100
+  
+  min.val <- 300 * mult
+  max.val <- 1600 * mult
+  val <- 550 * mult
+  
+  sliderInput('ome_summary_height', 'Figure height (px)',
+              min.val, max.val, val, 10)
+})
+
+output$ome_summary_var_ui <- renderUI({
+  vars <- colnames(g_data()$d3())
+  
+  selectInput('ome_summary_variable', 'Select the column of metabolite class',
+              choices = vars, multiple = F)
+})
+
+output$ome_summary_legend_ncol_ui <- renderUI({
+  req(g_data()$d3())
+  req(input$ome_summary_variable)
+  
+  d3 <- g_data()$d3()
+  ome_summary_variable <- input$ome_summary_variable
+  
+  n_group <- nlevels(g_data()$group())
+  
+  sliderInput('ome_summary_legend_ncol', 'Number of columns for legend',
+              1, 20, min(n_group, 5), 1)
+})
+
+output$ome_summary_ui <- renderUI({
+  req(g_data()$ome_summary())
+  
+  print('plot ome summary')
+  
+  p <- g_data()$ome_summary()[['ome_summary']]
+  
+  p_list <- list(renderPlot({
+    p
+  },
+  res = as.numeric(input$dpi),
+  width = input$ome_summary_width,
+  height = input$ome_summary_height
+  )
+  )
+  
+  tagList(p_list)
+})
+
+omeSummarySaveHandler <- function() {
+  req(g_data()$ome_summary())
+  
+  print('save ome summary')
+  
+  p <- g_data()$ome_summary()[['ome_summary']]
+  
+  dpi <- as.numeric(input$dpi)
+  w <- input$ome_summary_width / dpi
+  h <- input$ome_summary_height / dpi
+  image_format <- input$image_format
+  
+  ## tmp_report_dir is global variable
+  output_dir <- file.path(tmp_report_dir, my_options$summary_dir)
+  if(!dir.exists(output_dir)) {
+    dir.create(output_dir, recursive = T)
+  }
+  
+  filename_pdf <- file.path(output_dir,
+                            paste0(my_options$ome_summary_prefix, '.pdf'))
+  filename_png <- file.path(output_dir,
+                            paste0(my_options$ome_summary_prefix, '.png'))
+  filename_tiff <- file.path(output_dir,
+                             paste0(my_options$ome_summary_prefix, '.tiff'))
+  
+  
+  withProgress({
+    
+    for (i in 1:1) {
+      ggsave(filename_pdf, p, 
+             device = cairo_pdf, onefile = T,
+             width = w, height= h, units = 'in')
+      if (image_format == 'png') {
+        ggsave(filename_png, p, 
+               device = 'png', dpi = dpi,
+               width = w, height= h, units = 'in')
+      } else if (image_format == 'tiff') {
+        ggsave(filename_tiff, p, 
+               device = 'tiff', dpi = dpi,
+               width = w, height= h, units = 'in',
+               compression = 'lzw+p')
+      }
+      
+      # Increment the progress bar, and update the detail text.
+      incProgress(1, detail = paste("Plotting ome summary plot", i))
+    }
+    
+    # dev.off()
+  }, value = 0, message = 'Saving ome summary plot')
+  
+  return()
+}
+
+ome_summary_save <- observeEvent(input$ome_summary_button, {
+  omeSummarySaveHandler()
+})
+```
+
+```{r pca}
+#-----------------------------------
+# 2.1 PCA
+#-----------------------------------
+
+output$pca_ellipse_ui <- renderUI({
+  req(g_data()$group())
+  g <- g_data()$group()
+  
+  if (any(table(g) < 4)) {
+    selected <- 'confidence'
+  } else {
+    selected <- 'norm'
+  }
+  
+  selectInput('pca_ellipse',
+              'Ellipse type',
+              choices = c('none', 'convex', 'confidence', 't', 'norm'),
+              multiple = F, selected = selected
+  )
+})
+
+output$pca_scree_width_ui <- renderUI({
+  req(input$dpi)
+  ## multiplicative factor
+  mult <- as.numeric(input$dpi) / 100
+  
+  min.val <- 300 * mult
+  max.val <- 1600 * mult
+  val <- 1000 * mult
+  
+  sliderInput('pca_scree_width', 'Figure width (px)',
+              min.val, max.val, val, 10)
+})
+
+output$pca_scree_height_ui <- renderUI({
+  req(input$dpi)
+  ## multiplicative factor
+  mult <- as.numeric(input$dpi) / 100
+  
+  min.val <- 300 * mult
+  max.val <- 1600 * mult
+  val <- 800 * mult
+  
+  sliderInput('pca_scree_height', 'Figure height (px)',
+              min.val, max.val, val, 10)
+})
+
+output$pca_scree_ui <- renderUI({
+  req(g_data()$pca_scree())
+  print('plot pca_scree')
+  pca_scree <- g_data()$pca_scree()
+  
+  plot_output_list <- list(
+    renderPlot({
+      grid.draw(pca_scree)
+    },
+    res = as.numeric(input$dpi),
+    width = input$pca_scree_width,
+    height = input$pca_scree_height
+    )
+  )
+  print('end plot pca_scree')
+  tagList(plot_output_list)
+})
+
+output$pca_scree_top_n_ui <- renderUI({
+  req(input$file1)
+  
+  sliderInput('pca_scree_top_n', 'Show top N contributors, N =',
+              1, ncol(g_data()$d1()), 10, 1)
+})
+
+output$pca_ind_width_ui <- renderUI({
+  req(input$dpi)
+  ## multiplicative factor
+  mult <- as.numeric(input$dpi) / 100
+  
+  min.val <- 300 * mult
+  max.val <- 1600 * mult
+  val <- 600 * mult
+  
+  sliderInput('pca_ind_width', 'Figure width (px)',
+              min.val, max.val, val, 10)
+})
+
+output$pca_ind_height_ui <- renderUI({
+  req(input$dpi)
+  ## multiplicative factor
+  mult <- as.numeric(input$dpi) / 100
+  
+  min.val <- 300 * mult
+  max.val <- 1600 * mult
+  val <- 500 * mult
+  
+  sliderInput('pca_ind_height', 'Figure height (px)',
+              min.val, max.val, val, 10)
+})
+
+output$pca_ind_group_ui <- renderUI({
+  vars <- colnames(g_data()$d2())
+  
+  selectInput('pca_ind_group', 'Label points by group variable:',
+              choices = vars)
+})
+
+output$pca_ind_ui <- renderUI({
+  req(g_data()$pca_ind())
+  
+  print('plot pca_ind')
+  
+  pca_ind <- g_data()$pca_ind()
+  
+  plot_output_list <- lapply(pca_ind, function(x) {
+    renderPlot({
+      gg <- grid_fam(x, input$font_family)
+      grid.draw(gg)
+    },
+    res = as.numeric(input$dpi),
+    width = input$pca_ind_width,
+    height = input$pca_ind_height)
+  })
+  
+  print('end plot pca_ind')
+  tagList(plot_output_list)
+})
+
+pcaScreeSaveHandler <- function() {
+  req(g_data()$pca_scree())
+  
+  print('save pca_scree')
+  
+  pca_scree <- g_data()$pca_scree()
+  w <- input$pca_scree_width / as.numeric(input$dpi)
+  h <- input$pca_scree_height / as.numeric(input$dpi)
+  dpi <- as.numeric(input$dpi)
+  image_format <- input$image_format
+  
+  ## tmp_report_dir is global variable
+  output_dir <- file.path(tmp_report_dir, my_options$pca_dir)
+  if(!dir.exists(output_dir)) {
+    dir.create(output_dir, recursive = T)
+  }
+  
+  filename_pdf <- file.path(output_dir,
+                            paste0(my_options$pca_scree_prefix, '.pdf'))
+  filename_png <- file.path(output_dir,
+                            paste0(my_options$pca_scree_prefix, '.png'))
+  filename_tiff <- file.path(output_dir,
+                             paste0(my_options$pca_scree_prefix, '.tiff'))
+  
+  
+  withProgress({
+    # cairo_pdf(filename, width = w, height = h, onefile = T)
+    
+    for (i in 1:1) {
+      # suppressWarnings(grid.draw(pca_scree))
+      ggsave(filename_pdf, pca_scree, 
+             device = cairo_pdf, onefile = T,
+             width = w, height= h, units = 'in')
+      if (image_format == 'png') {
+        ggsave(filename_png, pca_scree, 
+               device = 'png', dpi = dpi,
+               width = w, height= h, units = 'in')
+      } else if (image_format == 'tiff') {
+        ggsave(filename_tiff, pca_scree, 
+               device = 'tiff', dpi = dpi,
+               width = w, height= h, units = 'in',
+               compression = 'lzw+p')
+      }
+      
+      # Increment the progress bar, and update the detail text.
+      incProgress(1, detail = paste("Plotting PCA scree plot", i))
+    }
+    
+    # dev.off()
+  }, value = 0, message = 'Saving PCA scree plot')
+  
+  return()
+}
+
+pca_scree_save <- observeEvent(input$pca_scree_button, {
+  pcaScreeSaveHandler()
+})
+
+pcaIndSaveHandler <- function() {
+  req(g_data()$pca_ind())
+  
+  print('save pca_ind')
+  
+  pca_ind <- g_data()$pca_ind()
+  w <- input$pca_ind_width / as.numeric(input$dpi)
+  h <- input$pca_ind_height / as.numeric(input$dpi)
+  dpi <- as.numeric(input$dpi)
+  image_format <- input$image_format
+  
+  ## tmp_report_dir is global variable
+  output_dir <- file.path(tmp_report_dir, my_options$pca_dir)
+  if(!dir.exists(output_dir)) {
+    dir.create(output_dir, recursive = T)
+  }
+  
+  filename_pdf <- file.path(output_dir,
+                            paste0(my_options$pca_ind_prefix, '.pdf'))
+  
+  cairo_pdf(filename = filename_pdf, onefile = T,
+         width = w, height = h)
+  
+  
+  withProgress({
+    
+    for (i in 1:length(pca_ind)) {
+      grid.newpage()
+      grid.draw(grid_fam(pca_ind[[i]], input$font_family))
+      incProgress(1/length(pca_ind), detail = paste("Saving PCA individual score plot"))
+    }
+    
+  }, value = 0, message = 'Saving PCA individual score plot to pdf')
+  
+  dev.off()
+  
+  withProgress({
+    # cairo_pdf(filename, width = w, height = h, onefile = T)
+    
+    for (i in 1:length(pca_ind)) {
+      print('grid draw pca ind')
+      # grid.newpage() 
+      # g <- pca_ind[[i]]
+      # suppressWarnings(grid.draw(g))
+
+      filename_png <- file.path(output_dir,
+                                paste0(my_options$pca_ind_prefix, '_', i, '.png'))
+      filename_tiff <- file.path(output_dir,
+                                 paste0(my_options$pca_ind_prefix, '_', i, '.tiff'))
+  
+
+      if (image_format == 'png') {
+        ggsave(filename_png, grid_fam(pca_ind[[i]], input$font_family),
+               device = 'png', dpi = dpi,
+               width = w, height = h, units = 'in')
+      } else if (image_format == 'tiff') {
+        ggsave(filename_tiff, grid_fam(pca_ind[[i]], input$font_family),
+               device = 'tiff', dpi = dpi,
+               width = w, height = h, units = 'in',
+               compression = 'lzw+p')
+      }
+      
+      # Increment the progress bar, and update the detail text.
+      incProgress(1/length(pca_ind), detail = paste("Saving PCA individual score plot"))
+    }
+    
+    # dev.off()
+  }, value = 0, message = 'Saving PCA individual score plot')
+  
+  return()
+}
+
+pca_ind_save <- observeEvent(input$pca_ind_button, {
+  pcaIndSaveHandler()
+})
+
+pcaCSVSaveHandler <- function() {
+  req(g_data()$pca())
+  req(g_data()$pca_scree())
+  
+  output_dir <- file.path(tmp_report_dir, my_options$pca_dir)
+  if(!dir.exists(output_dir)) {
+    dir.create(output_dir, recursive = T)
+  }
+  
+  pca <- g_data()$pca()
+  pca_scree <- g_data()$pca_scree()
+  
+  outfile_utf8_bom <- input$outfile_utf8_bom
+  filename_eig <- file.path(output_dir, 'PCA_eig.csv')
+  filename_contrib <- file.path(output_dir, 'PCA_contrib.csv')
+  filename_ind <- file.path(output_dir, 'PCA_ind.csv')
+  
+  if (!is.null(pca)) {
+    encoding <- ifelse(outfile_utf8_bom, 'UTF-8', '')
+    
+    ## export percentage variance 
+    if (outfile_utf8_bom) {
+      tmp <- data.frame(rname = rownames(pca$eig), pca$eig, check.names = F)
+      readr::write_excel_csv(tmp, filename_eig)
+      rm(tmp)
+    } else {
+      write.csv(pca$eig, file = filename_eig, 
+                row.names = T, fileEncoding = encoding)
+    }
+    
+    
+    ## export loadings
+    if (outfile_utf8_bom) {
+      tmp <- data.frame(rname = rownames(pca$var$contrib), pca$var$contrib, 
+                        check.names = F)
+      readr::write_excel_csv(tmp, filename_contrib)
+      rm(tmp)
+    } else {
+      write.csv(pca$var$contrib, file = filename_contrib, 
+                row.names = T, fileEncoding = encoding)
+    }
+    
+    ## export individual score
+    if (outfile_utf8_bom) {
+      tmp <- data.frame(rname = rownames(pca$ind$coord), pca$ind$coord,
+                        check.names = F)
+      readr::write_excel_csv(tmp, filename_ind)
+      rm(tmp)
+    } else {
+      write.csv(pca$ind$coord, file = filename_ind, 
+                row.names = T, fileEncoding = encoding)
+    }
+  }
+  
+  invisible()
+}
+```
+
+```{r heatmap}
+##----------------------------------------
+## 3.1 Heatmap & clustering
+##----------------------------------------
+# output$heatmap <- renderPlot({
+#     g_data()$pheatmap()
+# }, res = as.numeric(input$dpi))
+output$heatmap_width_ui <- renderUI({
+  req(g_data()$d1())
+  req(input$dpi)
+  req(input$heatmap_rotate)
+  ## multiplicative factor
+  mult <- as.numeric(input$dpi) / 100
+  
+  max_rowname_nchar <- max(nchar(rownames(g_data()$d1())))
+  ## max length of names in each class
+  max_colname_nchar <- max(nchar(colnames(g_data()$d1())))
+  
+  if (input$heatmap_rotate) {
+    nrows <-ncol(g_data()$d1())
+    ncols <- nrow(g_data()$d1())
+  } else {
+    nrows <- nrow(g_data()$d1())
+    ncols <- ncol(g_data()$d1())
+  }
+  
+  
+  if (input$heatmap_rotate) {
+    width_val <- 180 + max_colname_nchar * 6 + ncols * 12
+    height_val <- 150 + max_rowname_nchar * 6 +  nrows * 12
+  } else {
+    width_val <- 180 + max_rowname_nchar * 6 + ncols * 12
+    height_val <- 150 + max_colname_nchar * 6 +  nrows * 12
+  }
+  
+  if (!is.null(input$heatmap_annotate_sample)) {
+    nchar_annotate_sample <- max(nchar(g_data()$d2()[, input$heatmap_annotate_sample] %>% as.character))
+  } else {
+    nchar_annotate_sample <- 0
+  } 
+  
+  if (!is.null(input$heatmap_annotate_variable)) {
+    nchar_annotate_variable <- max(nchar(g_data()$d3()[, input$heatmap_annotate_variable] %>% as.character))
+  } else {
+    nchar_annotate_variable <- 0
+  }
+  
+  width_val <- width_val + max(c(nchar_annotate_sample, nchar_annotate_variable)) * 8
+  
+
+  min.val <- 300 * mult
+  max.val <- 4800 * mult
+  val <- min(width_val, 4800) * mult
+  
+  sliderInput('heatmap_width', 'Figure width (px)',
+              min.val, max.val, val, 10)
+})
+
+output$heatmap_height_ui <- renderUI({
+  req(g_data()$d1())
+  req(input$dpi)
+  req(input$heatmap_rotate)
+  ## multiplicative factor
+  mult <- as.numeric(input$dpi) / 100
+  
+  max_rowname_nchar <- max(nchar(rownames(g_data()$d1())))
+  ## max length of names in each class
+  max_colname_nchar <- max(nchar(colnames(g_data()$d1())))
+  
+  if (input$heatmap_rotate) {
+    nrows <-ncol(g_data()$d1())
+    ncols <- nrow(g_data()$d1())
+  } else {
+    nrows <- nrow(g_data()$d1())
+    ncols <- ncol(g_data()$d1())
+  }
+  
+  if (input$heatmap_rotate) {
+    width_val <- 180 + max_colname_nchar * 6 + ncols * 12
+    height_val <- 150 + max_rowname_nchar * 6 +  nrows * 12
+  } else {
+    width_val <- 180 + max_rowname_nchar * 6 + ncols * 12
+    height_val <- 150 + max_colname_nchar * 6 +  nrows * 12
+  }
+  
+  min.val <- 300 * mult
+  max.val <- 4800 * mult
+  val <- min(height_val, 4800) * mult
+  
+  sliderInput('heatmap_height', 'Figure height (px)',
+              min.val, max.val, val, 10)
+})
+
+output$heatmap_annotate_sample_ui <- renderUI({
+  vars <- colnames(g_data()$d2())
+  
+  selectInput('heatmap_annotate_sample', 'Annotate samples on properties',
+              choices = vars, multiple = T)
+})
+
+output$heatmap_annotate_var_ui <- renderUI({
+  vars <- colnames(g_data()$d3())
+  
+  selectInput('heatmap_annotate_variable', 'Annotate variables on properties',
+              choices = vars, multiple = T)
+})
+
+output$heatmap_ui <- renderUI({
+  req(g_data()$heatmap())
+  req(input$dpi)
+  req(input$heatmap_width)
+  req(input$heatmap_height)
+  req(input$font_family)
+  print('plot heatmap')
+
+  p_list <- list(renderPlot({
+    ph <- g_data()$heatmap()
+    draw(ph, 
+         merge_legends = T,
+         align_heatmap_legend = 'heatmap_top',
+         legend_grouping = 'original'
+         )
+    # grid.newpage()
+    # g <- grid_fam(ph, input$font_family)
+    # grid.draw(g)
+  },
+  res = as.numeric(input$dpi),
+  width = input$heatmap_width,
+  height = input$heatmap_height
+  )
+  )
+
+  print('end plot heatmap')
+  tagList(p_list)
+})
+
+output$heatmap_subplot_by_ui <- renderUI({
+  req(g_data()$d3())
+  
+  cols <- c('none', colnames(g_data()$d3()))
+  
+  selectInput('heatmap_subplot_by', 'Make subplot by column',
+              choices = cols, selected = 'none')
+})
+
+
+## this piece of code was moved out from heatmap_save so that it can be reused
+## in another event function
+heatmapSaveHandler <- function() {
+  req(g_data()$heatmap())
+  ## pheatmap_subplot is NULL if input$heatmap_subplot_by is none
+  # req(g_data()$pheatmap_subplot())
+  print('save heatmap')
+  
+  w <- input$heatmap_width / as.numeric(input$dpi)
+  h <- input$heatmap_height / as.numeric(input$dpi)
+  dpi <- as.numeric(input$dpi)
+  image_format <- input$image_format
+  font_family <- input$font_family
+  
+  p <- g_data()$heatmap()
+  
+  ## tmp_report_dir is global variable
+  output_dir <- file.path(tmp_report_dir, my_options$heatmap_dir)
+  if(!dir.exists(output_dir)) {
+    dir.create(output_dir, recursive = T)
+  }
+  
+  filename_pdf <- file.path(output_dir,
+                            paste0(my_options$heatmap_prefix, '.pdf'))
+  filename_png <- file.path(output_dir,
+                            paste0(my_options$heatmap_prefix, '.png'))
+  filename_tiff <- file.path(output_dir,
+                             paste0(my_options$heatmap_prefix, '.tiff'))
+  
+  withProgress({
+    cairo_pdf(filename_pdf, width = w, height = h, onefile = T, family = font_family)
+    draw(p, 
+         merge_legends = T,
+         align_heatmap_legend = 'heatmap_top',
+         legend_grouping = 'original'
+         )
+    dev.off()
+    
+    for (i in 1:1) {
+      # grid.newpage()
+      # g <- grid_fam(p, input$font_family)
+      # grid.draw(g)
+      # g <- p
+      # g
+      draw(p, 
+           merge_legends = T,
+           align_heatmap_legend = 'heatmap_top',
+           legend_grouping = 'original'
+           )
+      
+      
+      
+      if (image_format == 'png') {
+        png(filename_png, res = 300, width = w, height = h, 
+            compression = "lzw", units = 'in', family = font_family)
+        draw(p, 
+             merge_legends = T,
+             align_heatmap_legend = 'heatmap_top',
+             legend_grouping = 'original'
+             )
+        dev.off()
+        # ggsave(filename_png, g,
+        #        device = 'png', dpi = dpi,
+        #        width = w, height = h, units = 'in')
+      } else if (image_format == 'tiff') {
+        tiff(filename_tiff, res = 300, width = w, height = h, 
+             compression = "lzw+p", units = 'in', family = font_family)
+        draw(p, 
+             merge_legends = T,
+             align_heatmap_legend = 'heatmap_top',
+             legend_grouping = 'original'
+             )
+        dev.off()
+        # ggsave(filename_tiff, g,
+        #        device = 'tiff', dpi = dpi,
+        #        width = w, height = h, units = 'in',
+        #        compression = 'lzw+p')
+      }
+      
+      
+      # Increment the progress bar, and update the detail text.
+      incProgress(1, detail = paste("Plotting pheatmap"))
+    }
+    
+    dev.off()
+  }, value = 0, message = 'Saving heatmap')
+  
+  return()
+}
+
+heatmapSubplotSaveHandler <- function() {
+  req(g_data()$heatmap_subplot())
+  ## pheatmap_subplot is NULL if input$heatmap_subplot_by is none
+  # req(g_data()$pheatmap_subplot())
+  print('save heatmap subplot')
+  
+  dpi <- as.numeric(input$dpi)
+  image_format <- input$image_format
+  font_family <- input$font_family
+  
+  p_sub <- NULL
+  tryCatch(
+    p_sub <- g_data()$heatmap_subplot(),
+    error = function(e) { print('pheatmap_subplot not generated')}
+  ) 
+  
+  ## reactiveValues
+  size_params <- reactiveValuesToList(heatmapSubplot_params)
+  
+  ## tmp_report_dir is global variable
+  output_dir <- file.path(tmp_report_dir, my_options$heatmap_dir)
+  if(!dir.exists(output_dir)) {
+    dir.create(output_dir, recursive = T)
+  }
+  
+  withProgress({
+    ## plot pheatmap_subplot
+    if (!is.null(p_sub) & length(p_sub) > 0) {
+      for (i in 1:length(p_sub)) {
+        filename_pdf <- file.path(
+          output_dir, 
+          paste0(
+            my_options$heatmap_prefix, '_',
+            stringr::str_pad(
+              i, width = ceiling(log10(1 + length(p_sub))), 
+              pad = '0'
+            ), '.pdf'
+          )
+        )
+        filename_png <- file.path(
+          output_dir, 
+          paste0(
+            my_options$heatmap_prefix, '_',
+            stringr::str_pad(
+              i, width = ceiling(log10(1 + length(p_sub))), 
+              pad = '0'
+            ), '.png'
+          )
+        )
+        filename_tiff <- file.path(
+          output_dir, 
+          paste0(
+            my_options$heatmap_prefix, '_',
+            stringr::str_pad(
+              i, width = ceiling(log10(1 + length(p_sub))), 
+              pad = '0'
+            ), '.tiff'
+          )
+        )
+        
+        w <- size_params[[paste0('width', i)]] / dpi
+        h <- size_params[[paste0('height', i)]] / dpi
+        
+        # g <- grid_fam(p_sub[[i]], input$font_family)
+        g <- p_sub[[i]]
+        
+        cairo_pdf(filename_pdf, width = w, height = h, onefile = F, family = font_family)
+        draw(g, 
+             merge_legends = T,
+             align_heatmap_legend = 'heatmap_top',
+             legend_grouping = 'original'
+             )
+        # print(g)
+        # grid.draw(g)
+        dev.off()
+        
+        
+        if (image_format == 'png') {
+          png(filename_png, res = 300, width = w, height = h, 
+              compression = "lzw", units = 'in', family = font_family)
+          draw(g, 
+               merge_legends = T,
+               align_heatmap_legend = 'heatmap_top',
+               legend_grouping = 'original'
+               )
+          dev.off()
+          # ggsave(filename_png, g, 
+          #        device = 'png', dpi = dpi,
+          #        width = w, height = h, units = 'in')
+        } else if (image_format == 'tiff') {
+          tiff(filename_tiff, res = 300, width = w, height = h, 
+               compression = "lzw+p", units = 'in', family = font_family)
+          draw(g, 
+               merge_legends = T,
+               align_heatmap_legend = 'heatmap_top',
+               legend_grouping = 'original'
+               )
+          dev.off()
+          # ggsave(filename_tiff, g, 
+          #        device = 'tiff', dpi = dpi,
+          #        width = w, height = h, units = 'in',
+          #        compression = 'lzw+p')
+        }
+        
+        
+        # Increment the progress bar, and update the detail text.
+        incProgress(1 / (1 + length(p_sub)), 
+                    detail = paste("Plotting heatmap subplot: ", i))
+      }
+    }
+    
+    dev.off()
+  }, value = 0, message = 'Saving heatmap subplot')
+  
+  return()
+}
+
+heatmap_save <- observeEvent(input$heatmap_button, {
+  heatmapSaveHandler()
+  tryCatch(
+    heatmapSubplotSaveHandler(),
+    error = function(e) { print('heatmap subplot not generated')}
+  )
+})
+```
+
+```{r heatmap_subplot}
+## store input from module
+heatmapSubplot_params <- reactiveValues()
+
+observeEvent(input$printVal, {
+  print(reactiveValuesToList(heatmapSubplot_params))
+})
+
+## add subplot
+observeEvent(input$addHeatmapSubplotBtn, {
+  req(input$heatmap_subplot_by)
+  req(g_data()$d1())
+  req(g_data()$d3())
+  if (input$heatmap_subplot_by == 'none') {
+    return(NULL)
+  }
+
+  # req(g_data()$pheatmap_subplot())
+
+  pheatmap_list <- g_data()$heatmap_subplot
+
+  if (is.null(pheatmap_list())) return(NULL)
+  
+  # if (length(heatmapSubplot_params) > 0) return(NULL)
+
+  ## remove existing figures
+  removeUI(
+    selector = '#heatmapSubplot_1'
+  )
+  
+  insertUI(
+    selector = '#heatmapSubplot',
+    where = 'beforeEnd',
+    ui = tags$div(id = 'heatmapSubplot_1')
+  )
+  
+  d1 <- g_data()$d1()
+  ## for calculating default heatmap size
+  ## it depends on dim and length of names
+  max_rowname_nchar <- max(nchar(rownames(d1)))
+  
+  d3 <- g_data()$d3()
+  ## max length of names in each class
+  ## .default = 1 removes warning
+  ## .default = NULL pass x = integer(0) to max in the 1st iteration
+  max_colname_nchar <- vaggregate(
+    nchar(colnames(d1)), 
+    d3[, input$heatmap_subplot_by],
+    max,
+    .default = 1
+  )[rank(unique(d3[, input$heatmap_subplot_by]))]
+
+
+  if (input$heatmap_rotate) {
+      nrows <- table(d3[, input$heatmap_subplot_by])[unique(d3[, input$heatmap_subplot_by])]
+      ncols <- rep(
+        nrow(d1), 
+        length(unique(d3[, input$heatmap_subplot_by]))
+      )
+    } else {
+      ncols <- table(d3[, input$heatmap_subplot_by])[unique(d3[, input$heatmap_subplot_by])]
+      nrows <- rep(
+        nrow(d1), 
+        length(unique(d3[, input$heatmap_subplot_by]))
+      )
+    }
+  
+  # insertUI for each subplot
+  plyr::l_ply(1:length(pheatmap_list()), function(i) {
+    
+    if (input$heatmap_rotate) {
+      width_val <- 180 + max_colname_nchar[i] * 6 + ncols[i] * 12
+      height_val <- 150 + max_rowname_nchar * 6 +  nrows[i] * 12
+    } else {
+      width_val <- 180 + max_rowname_nchar * 6 + ncols[i] * 12
+      height_val <- 150 + max_colname_nchar[i] * 6 +  nrows[i] * 12
+    }
+    
+    ## add more width for legend
+    if (!is.null(input$heatmap_annotate_sample)) {
+      nchar_annotate_sample <- max(nchar(g_data()$d2()[, input$heatmap_annotate_sample] %>% as.character))
+    } else {
+      nchar_annotate_sample <- 0
+    } 
+    
+    if (!is.null(input$heatmap_annotate_variable)) {
+      nchar_annotate_variable <-  max_colname_nchar[i]
+    } else {
+      nchar_annotate_variable <- 0
+    }
+    
+    width_val <- width_val + max(c(nchar_annotate_sample, nchar_annotate_variable)) * 8
+    
+    
+    
+    p <- pheatmap_list()[[i]]
+    
+    insertUI(
+      selector = "#heatmapSubplot_1",
+      where = "beforeEnd",
+      ui = tagList(
+        hr(),
+        heatmapSubplotUI(
+          paste0('heatmap_subplot_', i),
+          as.numeric(input$dpi),
+          width_val,
+          height_val
+        )
+      )
+    )
+    
+    module_return <- callModule(heatmapSubplot, paste0('heatmap_subplot_', i), 
+                                pheatmap_list, i, as.numeric(input$dpi))
+    
+    ## avoid lazy evaluation if i is used in observe
+    
+    observe({
+      heatmapSubplot_params[[paste0('width', i)]] <- (module_return$width)
+      heatmapSubplot_params[[paste0('height', i)]] <- (module_return$height)
+      
+      print(heatmapSubplot_params[[paste0('width', i)]])
+      print(heatmapSubplot_params[[paste0('height', i)]])
+    })
+  })
+})
+
+
+## remove subplot
+observeEvent(input$removeHeatmapSubplotBtn, {
+  removeUI(
+    selector = '#heatmapSubplot_1'
+  )
+  heatmapSubplot_params <<- list()
+})
+
+```
+
+```{r oplsda}
+##----------------------------------------
+## 3.2 OPLS-DA
+##----------------------------------------
+output$oplsda_width_ui <- renderUI({
+  req(input$dpi)
+  ## multiplicative factor
+  mult <- as.numeric(input$dpi) / 100
+  
+  min.val <- 300 * mult
+  max.val <- 800 * mult
+  val <- 400 * mult
+  
+  sliderInput('oplsda_width', 'Figure width (px)',
+              min.val, max.val, val, 10)
+})
+
+output$oplsda_height_ui <- renderUI({
+  req(input$dpi)
+  ## multiplicative factor
+  mult <- as.numeric(input$dpi) / 100
+  
+  min.val <- 300 * mult
+  max.val <- 800 * mult
+  val <- 400 * mult
+  
+  sliderInput('oplsda_height', 'Figure height (px)',
+              min.val, max.val, val, 10)
+})
+
+output$oplsda_ui <- renderUI({
+  req(g_data()$oplsda())
+  
+  print('plot oplsda')
+  
+  oplsda_list <- g_data()$oplsda()
+  oplsda_label <- input$oplsda_label
+  parCexMetricN <- 0.8
+  font_family <- input$font_family
+  
+  if(length(oplsda_list) > 0) {
+    p_list <- lapply(oplsda_list, function(oplsda) {
+      if (inherits(oplsda, 'error')) {
+        return(
+          list(
+            h4(paste0(levels(attr(oplsda, 'suppLs')$y),
+                      collapse = '-')),
+            
+            renderText(oplsda$message),
+            
+            hr()
+          )
+        )
+      }
+      
+      # return factor
+      predicted <- ropls::predict(oplsda)
+      # set levels to be the same as predicted
+      reference <- factor(
+        attr(oplsda, 'suppLs')$yMCN[, 1],
+        levels = levels(predicted)
+      )
+      
+      if(ropls::getSummaryDF(oplsda)['ort'] > 0) {
+        
+        list(
+          h4(paste0(levels(attr(oplsda, 'suppLs')$y),
+                    collapse = '-')),
+          
+          renderPlot({
+            par(mfrow = c(3, 2), family = font_family)
+            ropls::plot(oplsda, typeVc = 'permutation', parDevNewL = F)
+            ropls::plot(oplsda, typeVc = 'overview', parDevNewL = F)
+            ropls::plot(oplsda, typeVc = 'outlier', parDevNewL = F)
+            
+            if(oplsda_label) {
+              ropls::plot(oplsda, typeVc = 'x-score', parDevNewL = F,
+                          parCexMetricN = parCexMetricN)
+            } else {
+              ropls::plot(oplsda, typeVc = 'x-score', parDevNewL = F, 
+                          parCexMetricN = parCexMetricN,
+                          parLabVc = rep('\u25CF', nrow(oplsda@scoreMN)))
+            }
+            
+            
+            pROC::plot.roc(pROC::roc(attr(oplsda, 'suppLs')$y,
+                                     attr(oplsda, 'scoreMN')[, 1]),
+                           print.auc = T, print.auc.cex = 2,
+                           main = 'ROC')
+          },
+          res = as.numeric(input$dpi),
+          width = input$oplsda_width * 2,
+          height = input$oplsda_height * 3
+          ),
+          
+          p(
+            sprintf('Sensitivity: %.2f; Specificity: %.2f; Negative level: %s; Positive level: %s',
+                    caret::sensitivity(table(predicted, reference)),
+                    caret::specificity(table(predicted, reference)),
+                    levels(predicted)[1],
+                    levels(predicted)[2]
+            )
+          ),
+          
+          datatable(
+            data.frame(VIP = sort(attr(oplsda, 'vipVn'), decreasing = T))
+          ),
+          
+          hr()
+        )
+      } else {
+        ## OPLS-DA with 0 orthogonal comp
+        list(
+          h4(paste0(levels(attr(oplsda, 'suppLs')$y),
+                    collapse = '-')),
+          
+          renderPlot({
+            par(mfrow = c(2, 2), family = font_family)
+            ropls::plot(oplsda, typeVc = 'permutation', parDevNewL = F)
+            ropls::plot(oplsda, typeVc = 'overview', parDevNewL = F)
+            # ropls::plot(oplsda, typeVc = 'outlier', parDevNewL = F)
+            # ropls::plot(oplsda, typeVc = 'x-score', parDevNewL = F)
+            
+            ## plot p1 only
+            d <- data.frame(
+              x = jitter(as.numeric(attr(oplsda, 'suppLs')$y),
+                         amount = 0.3),
+              g = attr(oplsda, 'suppLs')$y,
+              y = ropls::getScoreMN(oplsda)[, 1],
+              labels = rownames(ropls::getScoreMN(oplsda))
+            )
+            
+
+            plot(d$x, d$y, type = 'n', xaxt = 'n',
+                 xlim = c(0, 3),
+                 xlab = 'Group', ylab = 't1', main = 'Predictive score only')
+            
+            axis(1, at = c(1, 2), 
+                 labels=levels(attr(oplsda, 'suppLs')$y))
+            
+            if (oplsda_label) {
+              text(d$x, d$y, d$labels, 
+                   col = plyr::mapvalues(
+                     d$g,
+                     levels(d$g),
+                     c('blue', 'red')
+                   ) %>% as.character)
+            } else {
+              text(d$x, d$y, '\u25CF', 
+                 col = plyr::mapvalues(
+                   d$g,
+                   levels(d$g),
+                   c('blue', 'red')
+                 ) %>% as.character)
+            }
+            
+            
+            pROC::plot.roc(pROC::roc(attr(oplsda, 'suppLs')$y,
+                                     attr(oplsda, 'scoreMN')[, 1]),
+                           print.auc = T, print.auc.cex = 2,
+                           main = 'ROC')
+          },
+          res = as.numeric(input$dpi),
+          width = input$oplsda_width * 2,
+          height = input$oplsda_height * 2
+          ),
+          
+          p(
+            sprintf('Sensitivity: %.2f; Specificity: %.2f; Negative level: %s; Positive level: %s',
+                    caret::sensitivity(table(predicted, reference)),
+                    caret::specificity(table(predicted, reference)),
+                    levels(predicted)[1],
+                    levels(predicted)[2]
+            )
+          ),
+          
+          datatable(
+            data.frame(VIP = sort(attr(oplsda, 'vipVn'), decreasing = T))
+          ),
+          
+          hr()
+        )
+      }
+    }) %>% unlist(recursive = F)
+  } else{
+    return(NULL)
+  }
+  
+  p_list <- Filter(Negate(is.null), p_list)
+  
+  if(length(p_list) == 0)
+    return(NULL)
+  else
+    tagList(p_list)
+})
+
+oplsdaSaveHandler <- function() {
+  oplsda_list <- g_data()$oplsda()
+  font_family <- input$font_family
+  dpi <- as.numeric(input$dpi)
+  image_format <- input$image_format
+  oplsda_label <- input$oplsda_label
+  parCexMetricN <- 0.8
+  
+  output_dir <- file.path(tmp_report_dir, my_options$oplsda_dir)
+  if(!dir.exists(output_dir)) {
+    dir.create(output_dir, recursive = T)
+  }
+  
+  if(length(oplsda_list) > 0) {
+    withProgress({
+      for(i in 1:length(oplsda_list)) {
+        incProgress(1 / length(oplsda_list), 
+                    detail = paste0('Saving figure ', i))
+        
+        oplsda <- oplsda_list[[i]]
+        
+        if (inherits(oplsda, 'error')) {
+          
+          cat(oplsda$message)
+          
+        } else {
+          
+          if(ropls::getSummaryDF(oplsda)['ort'] > 0) {
+            
+            cairo_pdf(file = file.path(
+              output_dir,
+              paste0(my_options$oplsda_prefix, 
+                     fs::path_sanitize(paste0(levels(attr(oplsda, 'suppLs')$y), 
+                            collapse = '_'), replacement = '_'),
+                     '.pdf')),
+              width = input$oplsda_width * 2 / as.numeric(dpi),
+              height = input$oplsda_height * 3 / as.numeric(dpi),
+              onefile = T
+            )
+            
+            
+            par(mfrow = c(3, 2), family = font_family)
+            ropls::plot(oplsda, typeVc = 'permutation', parDevNewL = F)
+            ropls::plot(oplsda, typeVc = 'overview', parDevNewL = F)
+            ropls::plot(oplsda, typeVc = 'outlier', parDevNewL = F)
+            
+            if(oplsda_label) {
+              ropls::plot(oplsda, typeVc = 'x-score', parDevNewL = F,
+                          parCexMetricN = parCexMetricN)
+            } else {
+              ropls::plot(oplsda, typeVc = 'x-score', parDevNewL = F, 
+                          parCexMetricN = parCexMetricN,
+                          parLabVc = rep('\u25CF', nrow(oplsda@scoreMN)))
+            }
+            
+            pROC::plot.roc(pROC::roc(attr(oplsda, 'suppLs')$y,
+                                     attr(oplsda, 'scoreMN')[, 1]),
+                           print.auc = T, print.auc.cex = 2,
+                           main = 'ROC')
+            
+            dev.off()
+            
+            filename_png <- file.path(
+              output_dir,
+              paste0(my_options$oplsda_prefix, 
+                     fs::path_sanitize(paste0(levels(attr(oplsda, 'suppLs')$y), 
+                            collapse = '_'), replacement = '_'),
+                     '.png'))
+            filename_tiff <- file.path(
+              output_dir,
+              paste0(my_options$oplsda_prefix, 
+                     fs::path_sanitize(paste0(levels(attr(oplsda, 'suppLs')$y), 
+                            collapse = '_'), replacement = '_'),
+                     '.tiff'))
+            
+            if (image_format == 'png') {
+              png(file = filename_png,
+                  width = input$oplsda_width * 2 / as.numeric(dpi),
+                  height = input$oplsda_height * 3 / as.numeric(dpi),
+                  units = 'in', res = dpi
+              )
+            } else if (image_format == 'tiff') {
+              tiff(file = filename_tiff,
+                   width = input$oplsda_width * 2 / as.numeric(dpi),
+                   height = input$oplsda_height * 3 / as.numeric(dpi),
+                   units = 'in', res = dpi,
+                   compression = 'lzw+p'
+              )
+            }
+            
+            if (image_format != 'none') {
+              par(mfrow = c(3, 2), family = font_family)
+              ropls::plot(oplsda, typeVc = 'permutation', parDevNewL = F)
+              ropls::plot(oplsda, typeVc = 'overview', parDevNewL = F)
+              ropls::plot(oplsda, typeVc = 'outlier', parDevNewL = F)
+              
+              if(oplsda_label) {
+                ropls::plot(oplsda, typeVc = 'x-score', parDevNewL = F,
+                            parCexMetricN = parCexMetricN)
+              } else {
+                ropls::plot(oplsda, typeVc = 'x-score', parDevNewL = F, 
+                            parCexMetricN = parCexMetricN,
+                            parLabVc = rep('\u25CF', nrow(oplsda@scoreMN)))
+              }
+              
+              pROC::plot.roc(pROC::roc(attr(oplsda, 'suppLs')$y,
+                                       attr(oplsda, 'scoreMN')[, 1]),
+                             print.auc = T, print.auc.cex = 2,
+                             main = 'ROC')
+              
+              dev.off()
+            }
+            
+            
+          } else {
+            cairo_pdf(file = file.path(
+              output_dir,
+              paste0(my_options$oplsda_prefix, 
+                     fs::path_sanitize(paste0(levels(attr(oplsda, 'suppLs')$y), 
+                            collapse = '_'), replacement = '_'),
+                     '.pdf')),
+              width = input$oplsda_width * 2 / as.numeric(dpi),
+              height = input$oplsda_height * 2 / as.numeric(dpi),
+              onefile = T
+            )
+            
+            ## OPLS-DA with 0 orthogonal comp
+            par(mfrow = c(2, 2), family = font_family)
+            ropls::plot(oplsda, typeVc = 'permutation', parDevNewL = F)
+            ropls::plot(oplsda, typeVc = 'overview', parDevNewL = F)
+            # ropls::plot(oplsda, typeVc = 'outlier', parDevNewL = F)
+            # ropls::plot(oplsda, typeVc = 'x-score', parDevNewL = F)
+            
+            ## plot p1 only
+            d <- data.frame(
+              x = jitter(as.numeric(attr(oplsda, 'suppLs')$y),
+                         amount = 0.3),
+              g = attr(oplsda, 'suppLs')$y,
+              y = ropls::getScoreMN(oplsda)[, 1],
+              labels = rownames(ropls::getScoreMN(oplsda))
+            )
+            
+            plot(d$x, d$y, type = 'n', xaxt = 'n',
+                 xlim = c(0, 3),
+                 xlab = 'Group', ylab = 't1', main = 'Predictive score only')
+            
+            axis(1, at = c(1, 2), 
+                 labels=levels(attr(oplsda, 'suppLs')$y))
+            
+            if (oplsda_label) {
+              text(d$x, d$y, d$labels, 
+                   col = plyr::mapvalues(
+                     d$g,
+                     levels(d$g),
+                     c('blue', 'red')
+                   ) %>% as.character)
+            } else {
+              text(d$x, d$y, '\u25CF', 
+                   col = plyr::mapvalues(
+                     d$g,
+                     levels(d$g),
+                     c('blue', 'red')
+                   ) %>% as.character)
+            }
+            
+            pROC::plot.roc(pROC::roc(attr(oplsda, 'suppLs')$y,
+                                     attr(oplsda, 'scoreMN')[, 1]),
+                           print.auc = T, print.auc.cex = 2,
+                           main = 'ROC')
+            
+            dev.off()
+            
+            filename_png <- file.path(
+              output_dir,
+              paste0(my_options$oplsda_prefix, 
+                     fs::path_sanitize(paste0(levels(attr(oplsda, 'suppLs')$y), 
+                            collapse = '_'), replacement = '_'),
+                     '.png'))
+            filename_tiff <- file.path(
+              output_dir,
+              paste0(my_options$oplsda_prefix, 
+                     fs::path_sanitize(paste0(levels(attr(oplsda, 'suppLs')$y), 
+                            collapse = '_'), replacement = '_'),
+                     '.tiff'))
+            
+            if (image_format == 'png') {
+              png(file = filename_png,
+                  width = input$oplsda_width * 2 / as.numeric(dpi),
+                  height = input$oplsda_height * 2 / as.numeric(dpi),
+                  units = 'in', res = dpi
+              )
+            } else if (image_format == 'tiff') {
+              tiff(file = filename_tiff,
+                   width = input$oplsda_width * 2 / as.numeric(dpi),
+                   height = input$oplsda_height * 2 / as.numeric(dpi),
+                   units = 'in', res = dpi,
+                   compression = 'lzw+p'
+              )
+            }
+            
+            if (image_format != 'none') {
+              par(mfrow = c(2, 2), family = font_family)
+              ropls::plot(oplsda, typeVc = 'permutation', parDevNewL = F)
+              ropls::plot(oplsda, typeVc = 'overview', parDevNewL = F)
+              plot(d$x, d$y, type = 'n', xaxt = 'n',
+                   xlim = c(0, 3),
+                   xlab = 'Group', ylab = 't1', main = 'Predictive score only')
+              
+              axis(1, at = c(1, 2), 
+                   labels=levels(attr(oplsda, 'suppLs')$y))
+              
+              if (oplsda_label) {
+                text(d$x, d$y, d$labels, 
+                     col = plyr::mapvalues(
+                       d$g,
+                       levels(d$g),
+                       c('blue', 'red')
+                     ) %>% as.character)
+              } else {
+                text(d$x, d$y, '\u25CF', 
+                     col = plyr::mapvalues(
+                       d$g,
+                       levels(d$g),
+                       c('blue', 'red')
+                     ) %>% as.character)
+              }
+              
+              pROC::plot.roc(pROC::roc(attr(oplsda, 'suppLs')$y,
+                                       attr(oplsda, 'scoreMN')[, 1]),
+                             print.auc = T, print.auc.cex = 2,
+                             main = 'ROC')
+              dev.off()
+            }
+            
+          }
+        }
+      }
+    }, message = paste0('Saving OPLS-DA plots'))
+  }
+  return()
+}
+
+oplsda_save <- observeEvent(input$oplsda_button, {
+  print('save oplsda')
+  oplsdaSaveHandler()
+})
+
+oplsdaCSVSaveHandler <- function() {
+  req(g_data()$oplsda())
+  
+  output_dir <- file.path(tmp_report_dir, my_options$oplsda_dir)
+  if(!dir.exists(output_dir)) {
+    dir.create(output_dir, recursive = T)
+  }
+  
+  encoding <- ifelse(input$file_utf8, 'UTF-8', '')
+  outfile_utf8_bom <- input$outfile_utf8_bom
+  
+  oplsda_list <- g_data()$oplsda()
+  
+  if(length(oplsda_list) > 0) {
+    for(i in 1:length(oplsda_list)) {
+        oplsda <- oplsda_list[[i]]
+        
+        if (inherits(oplsda, 'error')) {
+          cat(oplsda$message)
+        } else {
+          tmp <- data.frame(VIP = sort(attr(oplsda, 'vipVn'), decreasing = T))
+          filename <- file.path(
+            output_dir,
+            fs::path_sanitize(paste0('VIP_',
+                                     paste0(levels(attr(oplsda, 'suppLs')$y), collapse = '_'),
+                                     '.csv'), replacement = '_'))
+          
+          if (outfile_utf8_bom) {
+            tmp <- cbind(rname = rownames(tmp), tmp)
+            readr::write_excel_csv(tmp, filename)
+          } else {
+            write.csv(
+              tmp,
+              file = filename,
+              row.names = T,
+              fileEncoding = encoding
+            )
+          }
+          rm(tmp, filename)
+        }
+    }
+  }
+}
+```
+
+```{r plsda}
+##----------------------------------------
+## 3.1 (Multi-level/sparse) PLS-DA
+##----------------------------------------
+output$plsda_ui <- renderUI({
+  req(input$do_splsda)
+  req(g_data()$plsda())
+  pls_list <- g_data()$plsda()
+  
+  if (length(pls_list) > 0) {
+    p_list <- list(
+      renderPlot({
+        pls_list$indiv$graph
+      },
+      res = as.numeric(input$dpi),
+      width = input$plsda_width,
+      height = input$plsda_height
+      )
+    )
+  } else {
+    return(NULL)
+  }
+  
+  tagList(p_list)
+})
+```
+
+```{r hypothesis_test}
+##------------------------------------------
+## 4.1 Hypothesis testing 
+##------------------------------------------
+output$hypothesis_pair_var <- renderText({
+  paste('Paired:', input$pair_var)
+})
+
+output$hypothesis_select_export_ui <- renderUI({
+  req(g_data()$group())
+  g <- g_data()$group()
+  
+  if (nlevels(g) > 2) {
+    vars <- c('parametric pvalue', 'non-parametric pvalue', 'TukeyHSD', 'Games-Howell', 'Dunn')
+  } else if (nlevels(g) == 2) {
+    vars <- c('parametric pvalue', 'non-parametric pvalue')
+  }
+  
+  selectInput('hypothesis_select_export',
+              'Select hypothesis tests P values to export',
+              choices = vars,
+              multiple = T, selected = vars
+  )
+})
+
+output$hypothesis_tbl <- renderDT({
+  if (is.null(g_data()$hypothesis_test())) return(NULL)
+  
+  datatable(g_data()$hypothesis_test(),
+            extensions = 'FixedColumns',
+            options = list(
+              scrollX = T,
+              FixedColumns = T
+            ))
+})
+
+output$hypothesis_p <- renderUI({
+  if (input$padjust != 'none')
+    p(sprintf('Posthoc test P values were adjusted by %s method.', input$padjust))
+  else
+    p('Posthoc test P values were not adjusted.')
+})
+
+hypothesisTestCSVSaveHandler <- function() {
+  req(g_data()$hypothesis_test())
+  req(input$padjust)
+  
+  output_dir <- file.path(tmp_report_dir, my_options$hypothesis_test_dir)
+  if(!dir.exists(output_dir)) {
+    dir.create(output_dir, recursive = T)
+  }
+  
+  hypothesis_select_export <- c(input$hypothesis_select_export, 'Fold')
+  
+  hypothesis_test_adjusted <- g_data()$hypothesis_test_adjusted()
+  method <- input$padjust
+  
+  withProgress({
+    
+    incProgress(1 / 2, detail = paste('Saving unadjusted hypothesis test results'))
+    ## unadjusted
+    hypothesis_test <- hypothesis_test_adjusted$unadjusted
+    
+    regp <- paste0('^', paste0(hypothesis_select_export, collapse = '|'))
+    
+    export_cols <- stringr::str_detect(colnames(hypothesis_test), regp)
+    
+    encoding <- ifelse(input$file_utf8, 'UTF-8', '')
+    outfile_utf8_bom <- input$outfile_utf8_bom
+    filename <- file.path(output_dir, 'hypothesis_test.csv')
+    
+    if(!is.null(hypothesis_test))
+      
+      if (outfile_utf8_bom) {
+        tmp <- data.frame(rname = rownames(hypothesis_test), hypothesis_test[, export_cols],
+                          check.names = F)
+        readr::write_excel_csv(tmp, filename)
+        rm(tmp)
+      } else {
+        write.csv(
+          hypothesis_test[, export_cols],
+          file = filename,
+          row.names = T, fileEncoding = encoding
+        )
+      }
+    
+    incProgress(1 / 2, detail = paste('Saving adjusted hypothesis test results'))
+    ## adjusted
+    if (input$padjust != 'none') {
+      hypothesis_test <- hypothesis_test_adjusted$adjusted
+      
+      regp <- paste0('^', paste0(hypothesis_select_export, collapse = '|'))
+      
+      export_cols <- stringr::str_detect(colnames(hypothesis_test), regp)
+      
+      encoding <- ifelse(input$file_utf8, 'UTF-8', '')
+      outfile_utf8_bom <- input$outfile_utf8_bom
+      filename <- file.path(output_dir, sprintf('hypothesis_test_%s_adjusted.csv', method))
+      
+      if(!is.null(hypothesis_test))
+        
+        if (outfile_utf8_bom) {
+          tmp <- data.frame(rname = rownames(hypothesis_test), hypothesis_test[, export_cols],
+                            check.names = F)
+          readr::write_excel_csv(tmp, filename)
+          rm(tmp)
+        } else {
+          write.csv(
+            hypothesis_test[, export_cols],
+            file = filename,
+            row.names = T, fileEncoding = encoding
+          )
+        }
+    }
+  }, message = 'Saving hypothesis test results to csv files.')
+  
+}
+
+hypothesis_test_save <- observeEvent(input$hypothesis_test_button, {
+  hypothesisTestCSVSaveHandler() 
+})
+```
+
+```{r volcano plot}
+##------------------------------------------
+## 4.2 Volcano plot
+##------------------------------------------
+output$volcano_width_ui <- renderUI({
+  req(input$dpi)
+  ## multiplicative factor
+  mult <- as.numeric(input$dpi) / 100
+  
+  min.val <- 300 * mult
+  max.val <- 1600 * mult
+  val <- 800 * mult
+  
+  sliderInput(
+    'volcano_width', 'Figure width (px)',
+    min.val, max.val, val, 10
+  )
+})
+
+output$volcano_height_ui <- renderUI({
+  req(input$dpi)
+  ## multiplicative factor
+  mult <- as.numeric(input$dpi) / 100
+  
+  min.val <- 300 * mult
+  max.val <- 1600 * mult
+  val <- 600 * mult
+  
+  sliderInput(
+    'volcano_height', 'Figure height (px)',
+    min.val, max.val, val, 10
+  )
+})
+
+output$volcano_p_ui <- renderUI({
+  req(g_data()$group())
+  
+  g <- g_data()$group()
+  g_mean <- mean(table(g))
+  g_min <- min(table(g))
+  
+  if (nlevels(g) == 1) return(NULL)
+  
+  if(nlevels(g) > 2) {
+    selectInput('volcano_p', 'Select hypothesis test pvalue to plot',
+                c('TukeyHSD', 'Games-Howell', 'Dunn'), 
+                selected = ifelse(g_mean >= 10 | g_min <= 3, 'Games-Howell', 'Dunn'))
+  }
+    
+  else
+    selectInput('volcano_p', 'Select hypothesis test pvalue to plot',
+                c('Parametric', 'Non-parametric'), 
+                selected =  ifelse(g_mean >= 10 | g_min <= 3, 'Parametric', 'Non-parametric'))
+})
+
+output$volcano_plot_ui <- renderUI({
+  req(g_data()$volcano())
+  req(input$dpi)
+  req(input$volcano_width)
+  req(input$volcano_height)
+
+  print('plot volcano')
+  
+  p_list <- g_data()$volcano()
+  
+
+  if (is.null(p_list)) return(NULL)
+  
+  plot_output_list <- lapply(p_list, function(p) {renderPlot(
+    {
+     
+      grid.draw(p)
+    },
+    res = as.numeric(input$dpi),
+    width = input$volcano_width,
+    height = input$volcano_height
+  )})
+  
+  print('end plot volcano')
+  tagList(plot_output_list)
+})
+
+volcanoSaveHandler <- function() {
+  req(g_data()$volcano())
+  
+  print('save volcano')
+  
+  p_list <- g_data()$volcano()
+  w <- input$volcano_width / as.numeric(input$dpi)
+  h <- input$volcano_height / as.numeric(input$dpi)
+  dpi <- as.numeric(input$dpi)
+  image_format <- input$image_format
+  
+  if (is.null(p_list)) return(NULL)
+  
+  output_dir <- file.path(tmp_report_dir, my_options$volcano_dir)
+  if(!dir.exists(output_dir)) {
+    dir.create(output_dir, recursive = T)
+  }
+  
+  filename_pdf <- file.path(output_dir, 
+                            paste0(my_options$volcano_prefix, '.pdf'))
+  
+  cairo_pdf(file = filename_pdf,
+            width = w,
+            height = h,
+            onefile = T
+  )
+  
+  withProgress({
+    for (i in 1:length(p_list)) {
+      incProgress(1 / length(p_list), detail = paste('Saving figure', i))
+      
+      dev.set(dev.list()['cairo_pdf'])
+      print(p_list[[i]])
+      
+      filename_png <- file.path(
+        output_dir, 
+        fs::path_sanitize(paste0(my_options$volcano_prefix, '_', names(p_list)[i], '.png'),
+                          replacement = '_'))
+      filename_tiff <- file.path(
+        output_dir, 
+        fs::path_sanitize(paste0(my_options$volcano_prefix, '_', names(p_list)[i], '.tiff'),
+                          replacement = '_'))
+      
+      
+      if (image_format == 'png') {
+        ggsave(filename_png, p_list[[i]],
+               device = 'png', dpi = dpi,
+               width = w, height= h, units = 'in')
+        ## make sure pdf and png look the same
+        # animation::ani.options(autobrowse = FALSE)
+        # animation::im.convert(filename_pdf, output = filename_png, 
+        #            extra.opts = sprintf("-density %d", dpi))
+        
+      } else if (image_format == 'tiff') {
+        ggsave(filename_tiff, p_list[[i]],
+               device = 'tiff', dpi = dpi,
+               width = w, height= h, units = 'in',
+               compression = 'lzw+p')
+        # animation::ani.options(autobrowse = FALSE)
+        # animation::im.convert(filename_pdf, output = filename_tiff,
+        #            extra.opts = sprintf("-density %d -compress lzw+p", dpi))
+      }
+      
+    }
+  }, message = 'Saving volcano plot to pdf')
+  
+  ## (g <- ggplotGrob(p)) open pdf device in grid_fam
+  dev.off(dev.list()['cairo_pdf'])
+  print('end save volcano plot')
+  return()
+}
+
+volcano_save <- observeEvent(input$volcano_button, {
+  volcanoSaveHandler() 
+})
+```
+
+```{r differential metabolites}
+##------------------------------------------
+## 4.2 differential metabolites
+##------------------------------------------
+output$differential_metabolites_width_ui <- renderUI({
+  req(input$dpi)
+  ## multiplicative factor
+  mult <- as.numeric(input$dpi) / 100
+  
+  min.val <- 300 * mult
+  max.val <- 1600 * mult
+  val <- 800 * mult
+  
+  sliderInput(
+    'differential_metabolites_width', 'Figure width (px)',
+    min.val, max.val, val, 10
+  )
+})
+
+output$differential_metabolites_height_ui <- renderUI({
+  req(input$dpi)
+  ## multiplicative factor
+  mult <- as.numeric(input$dpi) / 100
+  
+  min.val <- 300 * mult
+  max.val <- 1600 * mult
+  val <- 400 * mult
+  
+  sliderInput(
+    'differential_metabolites_height', 'Figure height (px)',
+    min.val, max.val, val, 10
+  )
+})
+
+output$differential_metabolites_p_ui <- renderUI({
+  req(g_data()$group())
+  g <- g_data()$group()
+  
+  ## mean number of samples in each group
+  g_mean <- mean(table(g))
+  g_min <- min(table(g))
+  
+  if (nlevels(g) == 1) return(NULL)
+  
+  if(nlevels(g) > 2) {
+    selectInput('differential_metabolites_p', 'Select hypothesis test pvalue to plot',
+                c('TukeyHSD', 'Games-Howell', 'Dunn'), 
+                selected = ifelse(g_mean >= 10 | g_min <= 3, 'Games-Howell', 'Dunn'))
+  } else {
+    selectInput('differential_metabolites_p', 'Select hypothesis test pvalue to plot',
+                c('Parametric', 'Non-parametric'), 
+                selected =  ifelse(g_mean >= 10 | g_min <= 3, 'Parametric', 'Non-parametric'))
+  }
+})
+
+output$differential_metabolites_max_label_ui <- renderUI({
+  req(g_data()$hypothesis_test())
+  req(input$differential_metabolites_p)
+  
+  
+  sig_lvl <- as.numeric(input$differential_metabolites_sig_lvl)
+  ngroup <- nlevels(g_data()$group())
+  
+  d.ht <- g_data()$hypothesis_test()
+  max_label <- min(5, nrow(d.ht))
+  
+  ## if all the columns have >=10 significant 
+  if (ngroup == 2) {
+    if (input$differential_metabolites_p == 'Parametric') {
+      if (length(which(d.ht[, 'parametric pvalue'] < sig_lvl)) >= 10) {
+        max_label <- 10
+      }
+    } else if (input$differential_metabolites_p == 'Non-parametric') {
+      if (length(which(d.ht[, 'non-parametric pvalue'] < sig_lvl)) >= 10) {
+        max_label <- 10
+      }
+    }
+  } else if (ngroup > 2) {
+    if(all(apply(d.ht[, stringr::str_detect(
+      colnames(d.ht), 
+      stringr::regex(paste0('^', input$differential_metabolites_p), ignore_case = T)), drop = F],
+      2, function(x) {length(which(x < sig_lvl))}) >= 10)) {
+      max_label <- 10
+    }
+  } else {
+    return(NULL)
+  }
+  
+  sliderInput(
+    'differential_metabolites_max_label', 'Max number of labels to display (rank by p value)',
+    1, 20, max_label, 1
+  )
+})
+
+
+output$differential_metabolites_plot_ui <- renderUI({
+  req(T)
+  req(g_data()$hypothesis_test())
+  req(g_data()$group())
+  req(input$differential_metabolites_sig_lvl)
+  req(input$differential_metabolites_fold_cutoff)
+  req(input$differential_metabolites_p)
+  
+  print('plot differential metabolites')
+  
+  d.ht <- g_data()$hypothesis_test()
+  g <- g_data()$group()
+  sig_lvl <- as.numeric(input$differential_metabolites_sig_lvl)
+  fold_cutoff <- as.numeric(input$differential_metabolites_fold_cutoff)
+  volcano_p <- input$differential_metabolites_p
+  max_label <- input$differential_metabolites_max_label
+  ggtheme <- g_data()$ggtheme()
+  font_family <- input$font_family
+  
+  if (nlevels(g) == 1) return(NULL)
+  
+  if (nlevels(g) > 2) {
+    ## choose P value type in volcano plot
+    # req(input$volcano_p)
+    
+    ## only look at combination containing base level
+    combs <- as.data.frame(combn(levels(g), 2))
+    # combs <- combs[stringr::str_detect(
+    #     combs, paste0('^', Hmisc::escapeRegex(base_lvl), ':|:', 
+    #                   Hmisc::escapeRegex(base_lvl), '$'))
+    #     ]
+    
+    plot_output_list <- lapply(combs, function(x) {
+      d <- d.ht[, c(paste0(volcano_p, ': ', paste0(rev(x), collapse = ':')), 
+                    paste0('Fold: ', x[2], '/', x[1])), drop = F] %>% 
+        data.frame(check.names = F)
+      d[, 'label'] <- rownames(d.ht)
+      
+      renderPlot({
+        plotDifferentialMetabolites(d, sig_lvl, fold_cutoff, max_label, 
+                         title = paste0(x[2], '/', x[1]), 
+                         ggtheme, font_family = font_family
+        )
+      },     
+      res = as.numeric(input$dpi),
+      width = input$differential_metabolites_width,
+      height = input$differential_metabolites_height)
+    })
+  } else {
+    p_col <- ifelse(volcano_p == 'Parametric', 'parametric pvalue', 'non-parametric pvalue')
+    d <- d.ht[, c(p_col, paste0('Fold: ', levels(g)[2], '/', levels(g)[1])), drop = F] %>%
+      data.frame
+    
+    d[, 'label'] <- rownames(d.ht)
+    
+    plot_output_list <- renderPlot({
+      plotDifferentialMetabolites(d, sig_lvl, fold_cutoff, max_label, 
+                       title = paste0(levels(g)[2], '/', levels(g)[1]),
+                       ggtheme = ggtheme,
+                       font_family = font_family
+      )
+    },
+    res = as.numeric(input$dpi),
+    width = input$differential_metabolites_width,
+    height = input$differential_metabolites_height)
+  }
+  
+  tagList(plot_output_list)
+})
+
+differentialMetabolitesSaveHandler <- function() {
+  print('save differential metabolites')
+  
+  d.ht <- g_data()$hypothesis_test()
+  g <- g_data()$group()
+  sig_lvl <- as.numeric(input$differential_metabolites_sig_lvl)
+  fold_cutoff <- as.numeric(input$differential_metabolites_fold_cutoff)
+  volcano_p <- input$differential_metabolites_p
+  max_label <- input$differential_metabolites_max_label
+  ggtheme <- g_data()$ggtheme()
+  font_family <- input$font_family
+  
+  w <- input$differential_metabolites_width / as.numeric(input$dpi)
+  h <- input$differential_metabolites_height / as.numeric(input$dpi)
+  dpi <- as.numeric(input$dpi)
+  image_format <- input$image_format
+  font_family <- input$font_family
+  
+  output_dir <- file.path(tmp_report_dir, my_options$differential_metabolites_dir)
+  if(!dir.exists(output_dir)) {
+    dir.create(output_dir, recursive = T)
+  }
+  
+  if (nlevels(g) == 1) return(NULL)
+  
+  withProgress({
+    ##-------------------------
+    ## save pdf
+    ##--------------------------
+    filename_pdf <- file.path(output_dir, 
+                              paste0(my_options$differential_metabolites_prefix, '.pdf'))
+    
+    cairo_pdf(file = filename_pdf,
+              width = w,
+              height = h,
+              onefile = T,
+              family = font_family
+    )
+    
+    if (nlevels(g) > 2) {
+      ## choose P value type in volcano plot
+      # req(input$volcano_p)
+      
+      ## only look at combination containing base level
+      combs <- as.data.frame(combn(levels(g), 2))
+      
+      plyr::l_ply(combs, function(x) {
+        d <- d.ht[, c(paste0(volcano_p, ': ', paste0(rev(x), collapse = ':')), 
+                      paste0('Fold: ', x[2], '/', x[1])), drop = F] %>% data.frame(check.names = F)
+        d[, 'label'] <- rownames(d.ht)
+        
+        plotDifferentialMetabolites(d, sig_lvl, fold_cutoff, max_label, 
+                         title = paste0(x[2], '/', x[1]), 
+                         ggtheme, font_family = font_family
+        )
+      })
+    } else {
+      p_col <- ifelse(volcano_p == 'Parametric', 'parametric pvalue', 'non-parametric pvalue')
+      d <- d.ht[, c(p_col, paste0('Fold: ', levels(g)[2], '/', levels(g)[1])), drop = F] %>%
+        data.frame
+      
+      d[, 'label'] <- rownames(d.ht)
+      
+      plotDifferentialMetabolites(d, sig_lvl, fold_cutoff, max_label, 
+                       title = paste0(levels(g)[2], '/', levels(g)[1]),
+                       ggtheme = ggtheme,
+                       font_family = font_family)
+    }
+    
+    ## end saving pdf
+    dev.off()
+    
+    incProgress(0.5, detail = paste('Saving figure to pdf'))
+    
+    ##-------------------------
+    ## save bitmap
+    ##--------------------------
+    
+    
+    if (nlevels(g) > 2) {
+      ## choose P value type in volcano plot
+      # req(input$volcano_p)
+      
+      ## only look at combination containing base level
+      combs <- as.data.frame(combn(levels(g), 2))
+      
+      plyr::l_ply(combs, function(x) {
+        
+        filename_png <- file.path(
+          output_dir, 
+          fs::path_sanitize(paste0(my_options$differential_metabolites_prefix, '_', x[2], '_', x[1], '.png'),
+                            replacement = '_'))
+        filename_tiff <- file.path(
+          output_dir, 
+          fs::path_sanitize(paste0(my_options$differential_metabolites_prefix, '_', x[2], '_', x[1], '.tiff'),
+                            replacement = '_'))
+        
+        
+        if (image_format == 'png') {
+          png(filename_png,
+              res = dpi,
+              width = w, height= h, units = 'in')
+          
+        } else if (image_format == 'tiff') {
+          tiff(filename_tiff,
+               res = dpi,
+               width = w, height= h, units = 'in',
+               compression = 'lzw+p')
+        }
+        
+        d <- d.ht[, c(paste0(volcano_p, ': ', paste0(rev(x), collapse = ':')), 
+                      paste0('Fold: ', x[2], '/', x[1])), drop = F] %>% data.frame(check.names = F)
+        d[, 'label'] <- rownames(d.ht)
+        
+        plotDifferentialMetabolites(d, sig_lvl, fold_cutoff, max_label, 
+                         title = paste0(x[2], '/', x[1]), 
+                         ggtheme, font_family = font_family
+        )
+        
+        dev.off()
+      })
+    } else {
+      p_col <- ifelse(volcano_p == 'Parametric', 'parametric pvalue', 'non-parametric pvalue')
+      d <- d.ht[, c(p_col, paste0('Fold: ', levels(g)[2], '/', levels(g)[1])), drop = F] %>%
+        data.frame
+      
+      d[, 'label'] <- rownames(d.ht)
+      
+      filename_png <- file.path(
+        output_dir, 
+        paste0(my_options$differential_metabolites_prefix, '.png'))
+      filename_tiff <- file.path(
+        output_dir, 
+        paste0(my_options$differential_metabolites_prefix, '.tiff'))
+      
+      
+      if (image_format == 'png') {
+        png(filename_png,
+            res = dpi,
+            width = w, height= h, units = 'in')
+        
+      } else if (image_format == 'tiff') {
+        tiff(filename_tiff,
+             res = dpi,
+             width = w, height= h, units = 'in',
+             compression = 'lzw+p')
+      }
+      
+      plotDifferentialMetabolites(d, sig_lvl, fold_cutoff, max_label, 
+                       title = paste0(levels(g)[2], '/', levels(g)[1]),
+                       ggtheme = ggtheme,
+                       font_family = font_family)
+      
+      dev.off()
+    }
+    
+  }, message = 'Saving differential metabolites plot to pdf')
+
+  return()
+}
+
+differential_metabolites_save <- observeEvent(input$differential_metabolites_button, {
+  differentialMetabolitesSaveHandler()
+})
+```
+
+```{r boxplot}
+##------------------------------------------
+## 4.2 Box plot
+##------------------------------------------
+output$boxplot_width_ui <- renderUI({
+  req(input$dpi)
+  req(input$boxplot_ncol)
+  
+  ## multiplicative factor
+  mult <- as.numeric(input$dpi) / 100
+  ## number of columns
+  ncols <- input$boxplot_ncol
+  
+  min.val <- 300 * mult * ncols
+  max.val <- 1600 * mult * ncols
+  val <- 400 * mult * ncols
+  
+  sliderInput(
+    'boxplot_width', 'Figure width (px)',
+    min.val, max.val, val, 10
+  )
+})
+
+output$boxplot_height_ui <- renderUI({
+  req(input$dpi)
+  req(input$boxplot_ncol)
+  
+  ## multiplicative factor
+  mult <- as.numeric(input$dpi) / 100
+  ## number of columns
+  ncols <- input$boxplot_ncol
+  ## number of rows
+  nrows <- ifelse(
+    ncols == 1, 1,
+    ceiling(input$boxplot_top_n / input$boxplot_ncol)
+  )
+  
+  min.val <- 300 * mult * nrows
+  max.val <- 1600 * mult * nrows
+  val <- 400 * mult * nrows
+  
+  sliderInput(
+    'boxplot_height', 'Figure height (px)',
+    min.val, max.val, val, 10
+  )
+})
+
+output$boxplot_ncol_ui <- renderUI({
+  req(g_data()$d1())
+  
+  selected <- min(ncol(g_data()$d1()), 2)
+  sliderInput('boxplot_ncol', 'Arrange figures in N columns',
+              1, 5, selected, 1)
+})
+
+output$boxplot_top_n_ui <- renderUI({
+  req(g_data()$d1())
+  
+  ncols <- ncol(g_data()$d1())
+  
+  sliderInput('boxplot_top_n', 'Show top N significant',
+              1, min(10, ncols), 4, 1)
+})
+
+output$boxplot_top_n_by_ui <- renderUI({
+  req(g_data()$hypothesis_test())
+  req(g_data()$group())
+  
+  g <- g_data()$group()
+  dh <- g_data()$hypothesis_test()
+  g_mean <- mean(table(g))
+  g_min <- min(table(g))
+  
+  ## remove colnames like Fold:
+  choices <- colnames(dh)[!(stringr::str_detect(colnames(dh), '^Fold'))]
+  
+  selectInput(
+    'boxplot_top_n_by',
+    'Rank significance by',
+    choices = choices,
+    selected = ifelse(g_mean >= 10 | g_min <= 3, 'parametric pvalue', 'non-parametric pvalue')
+  )
+})
+
+output$boxplot_posthoc_ui <- renderUI({
+  ## select posthoc type to display when adding significance to boxplot
+  req(g_data()$group())
+  req(input$boxplot_add_sig)
+  
+  g <- g_data()$group()
+  add_sig <- input$boxplot_add_sig
+  g_mean <- mean(table(g))
+  g_min <- min(table(g))
+  
+  if (nlevels(g) == 1) return(NULL)
+  if (nlevels(g) > 2) {
+    choices <- c('TukeyHSD', 'Games-Howell', 'Dunn')
+    selected <- ifelse(g_mean >= 10 | g_min <= 3, 'Games-Howell', 'Dunn')
+  } else {
+    choices <- c('Parametric', 'Non-parametric')
+    selected <- ifelse(g_mean >= 10 | g_min <= 3, 'Parametric', 'Non-parametric')
+  }
+  
+  if (add_sig)
+    selectInput(
+      'boxplot_posthoc', 'Select hypothesis test pvalue to annotate on boxplot',
+      choices = choices, selected = selected
+    )
+  else
+    NULL
+})
+
+output$boxplot_ui <- renderUI({
+  ## only boxplot to show
+  req(g_data()$boxplot())
+  req(input$boxplot_ncol)
+  req(input$dpi)
+  req(input$boxplot_width)
+  req(input$boxplot_height)
+  print('plot shown boxplot')
+  
+  p_list <- g_data()$boxplot()
+  ncols <- input$boxplot_ncol
+  nrows <- ceiling(length(p_list) / ncols)
+
+  if (ncols == 1) {
+    ## arrange in 1 column
+    p_shown_list <- p_list
+  } else {
+    p_shown_list <- list(
+      boxplot = gridExtra::marrangeGrob(p_list, nrow=nrows, ncol=ncols, top = NULL)
+    )
+  }
+
+  plot_output_list <- lapply(p_shown_list, function(p) {renderPlot(
+      {
+        grid.newpage()
+        grid.draw(p)
+      },
+      res = as.numeric(input$dpi),
+      width = input$boxplot_width,
+      height = input$boxplot_height
+    )})
+
+  print('end plot shown boxplot')
+  tagList(plot_output_list)
+
+})
+
+boxplotSaveHandler <- function() {
+  ## g_data()$boxplot() stores the top_n plots
+  req(g_data()$d1())
+  req(g_data()$group())
+  req(g_data()$hypothesis_test())
+  
+  print('save boxpot')
+  
+  if (input$pair_var == 'None') {
+    pair <- NA
+  } else {
+    pair <- as.factor(g_data()$pair())
+  }
+  
+  ## add jitter
+  add_jitter <- input$boxplot_add_jitter
+  ## add point
+  add_point <- input$boxplot_add_point
+  ## show significance
+  add_sig <- input$boxplot_add_sig
+  ## show violin
+  add_violin <- input$boxplot_add_violin
+  ## notch
+  notch <- input$boxplot_notch
+  ## x label angle
+  x_angle <- input$boxplot_x_angle
+  h_just <- input$boxplot_hjust
+  v_just <- input$boxplot_vjust
+  ## unit
+  unit <- input$unit
+  ## ggplot theme
+  ggtheme <- g_data()$ggtheme()
+  font_family <- input$font_family
+  
+  ## number of columns
+  ncols <- input$boxplot_ncol
+  ## number of rows
+  nrows <- ifelse(
+    ncols == 1, 1,
+    ceiling(input$boxplot_top_n / input$boxplot_ncol)
+  )
+  
+  d <- g_data()$d1()
+  g <- g_data()$group()
+  dh <- g_data()$hypothesis_test()
+  
+  posthoc <- NULL
+  if (add_sig) {
+    req(input$boxplot_posthoc)
+    posthoc <- input$boxplot_posthoc
+  }
+  
+  if (ncols == 1) {
+    w <- input$boxplot_width / as.numeric(input$dpi)
+    h <- input$boxplot_height / as.numeric(input$dpi)
+  } else {
+    w <- input$boxplot_width / as.numeric(input$dpi) / ncols
+    h <- input$boxplot_height / as.numeric(input$dpi) / nrows
+  }
+  
+  n <- ncol(d)
+  
+  ## tmp_report_dir is global variable
+  output_dir <- file.path(tmp_report_dir, my_options$boxplot_dir)
+  if(!dir.exists(output_dir)) {
+    dir.create(output_dir, recursive = T)
+  }
+  
+  filename_pdf <- file.path(output_dir, 
+                            paste0(my_options$boxplot_prefix, '.pdf'))
+  
+  withProgress({
+    incProgress(1/(n + 1), detail = paste("Generating figures", n))
+    
+    p_list <- batch_boxplot(d, g, dh, pair,
+                            posthoc = posthoc, unit = unit, add_jitter = add_jitter,
+                            add_point = add_point, add_sig = add_sig, add_violin = add_violin,
+                            notch = notch, x_angle = x_angle, h_just = h_just, v_just = v_just, 
+                            ggtheme = ggtheme, font_family = font_family)
+    
+    cairo_pdf(filename_pdf, width = w, height = h, onefile = T)
+    
+    for (i in 1:n) {
+      grid.draw(p_list[[i]])
+      
+      # Increment the progress bar, and update the detail text.
+      incProgress(1/(n + 1), detail = paste("Plotting figure", i))
+    }
+    
+    dev.off()
+  }, value = 0, message = 'Saving boxplot to pdf')
+  
+  return()
+}
+
+boxplotShownSaveHandler <- function() {
+  req(g_data()$boxplot())
+  
+  print('save shown boxplot')
+  
+  p_list <- g_data()$boxplot()
+  ncols <- input$boxplot_ncol
+  nrows <- ceiling(length(p_list) / ncols)
+  
+  if (ncols == 1) {
+    ## arrange in 1 column
+    p_shown_list <- p_list
+  } else {
+    p_shown_list <- list(
+      boxplot = gridExtra::marrangeGrob(p_list, nrow=nrows, ncol=ncols, top = NULL)
+    )
+  }
+  
+  w <- input$boxplot_width / as.numeric(input$dpi)
+  h <- input$boxplot_height / as.numeric(input$dpi)
+  dpi <- as.numeric(input$dpi)
+  image_format <- input$image_format
+  
+  ## tmp_report_dir is global variable
+  output_dir <- file.path(tmp_report_dir, my_options$boxplot_dir)
+  if(!dir.exists(output_dir)) {
+    dir.create(output_dir, recursive = T)
+  }
+  
+  filename_pdf <- file.path(output_dir,
+                            paste0(my_options$boxplot_prefix, '_report.pdf'))
+
+  if (length(p_shown_list) > 0) {
+    cairo_pdf(filename = filename_pdf, width = w, height = h,
+              onefile = T)
+  }  
+  
+  withProgress({
+    # cairo_pdf(filename, width = w, height = h, onefile = T)
+    
+    for (i in 1:length(p_shown_list)) {
+      filename_png <- file.path(
+        output_dir,
+        paste0(my_options$boxplot_prefix, '_report_', i, '.png'))
+      filename_tiff <- file.path(
+        output_dir,
+        paste0(my_options$boxplot_prefix, '_report_', i, '.tiff'))
+      
+      print(p_shown_list[[i]])
+      
+      if (image_format == 'png') {
+        ggsave(filename_png, p_shown_list[[i]], 
+               device = 'png', dpi = dpi,
+               width = w, height = h, units = 'in')
+      } else if (image_format == 'tiff') {
+        ggsave(filename_tiff, p_shown_list[[i]], 
+               device = 'tiff', dpi = dpi,
+               width = w, height = h, units = 'in',
+               compression = 'lzw+p')
+      }
+      
+      # Increment the progress bar, and update the detail text.
+      incProgress(1, detail = paste("Saving shown boxplot", i))
+    }
+    
+    dev.off()
+  }, value = 0, message = 'Saving shown boxplot')
+  
+  return()
+}
+
+boxplot_save <- observeEvent(input$boxplot_button, {
+  boxplotShownSaveHandler()
+  boxplotSaveHandler() 
+})
+```
+
+```{r barplot}
+#------------------------------------------
+## 4.3 Barplot
+##------------------------------------------
+output$barplot_width_ui <- renderUI({
+  req(input$dpi)
+  req(input$barplot_ncol)
+  
+  ## multiplicative factor
+  mult <- as.numeric(input$dpi) / 100
+  ## number of columns
+  ncols <- input$barplot_ncol
+  
+  min.val <- 300 * mult * ncols
+  max.val <- 1600 * mult * ncols
+  val <- 400 * mult * ncols
+  
+  sliderInput(
+    'barplot_width', 'Figure width (px)',
+    min.val, max.val, val, 10
+  )
+})
+
+output$barplot_height_ui <- renderUI({
+  req(input$dpi)
+  req(input$barplot_ncol)
+  
+  ## multiplicative factor
+  mult <- as.numeric(input$dpi) / 100
+  ## number of columns
+  ncols <- input$barplot_ncol
+  ## number of rows
+  nrows <- ifelse(
+    ncols == 1, 1,
+    ceiling(input$barplot_top_n / input$barplot_ncol)
+  )
+  
+  min.val <- 300 * mult * nrows
+  max.val <- 1600 * mult * nrows
+  val <- 400 * mult * nrows
+  
+  sliderInput(
+    'barplot_height', 'Figure height (px)',
+    min.val, max.val, val, 10
+  )
+})
+
+output$barplot_ncol_ui <- renderUI({
+  req(g_data()$d1())
+  
+  selected <- min(ncol(g_data()$d1()), 2)
+  sliderInput('barplot_ncol', 'Arrange figures in N columns',
+              1, 5, selected, 1)
+})
+
+output$barplot_top_n_ui <- renderUI({
+  req(g_data()$d1())
+  
+  ncols <- ncol(g_data()$d1())
+  
+  sliderInput('barplot_top_n', 'Show top N significant',
+              1, min(10, ncols), 4, 1)
+})
+
+output$barplot_top_n_by_ui <- renderUI({
+  req(g_data()$hypothesis_test())
+  req(g_data()$group())
+  
+  g <- g_data()$group()
+  dh <- g_data()$hypothesis_test()
+  g_mean <- mean(table(g))
+  g_min <- min(table(g))
+  
+  ## remove colnames like Fold:
+  choices <- colnames(dh)[!(stringr::str_detect(colnames(dh), '^Fold'))]
+  
+  selectInput(
+    'barplot_top_n_by',
+    'Rank significance by',
+    choices = choices,
+    selected = ifelse(g_mean >= 10 | g_min <= 3, 'parametric pvalue', 'non-parametric pvalue')
+  )
+})
+
+output$barplot_posthoc_ui <- renderUI({
+  ## select posthoc type to display when adding significance to barplot
+  req(g_data()$group())
+  req(input$barplot_add_sig)
+  
+  g <- g_data()$group()
+  add_sig <- input$barplot_add_sig
+  g_mean <- mean(table(g))
+  g_min <- min(table(g))
+  
+  if (nlevels(g) == 1) return(NULL)
+  if (nlevels(g) > 2) {
+    choices <- c('TukeyHSD', 'Games-Howell', 'Dunn')
+    selected <- ifelse(g_mean >= 10 | g_min <= 3, 'Games-Howell', 'Dunn')
+  } else {
+    choices <- c('Parametric', 'Non-parametric')
+    selected <- ifelse(g_mean >= 10 | g_min <= 3, 'Parametric', 'Non-parametric')
+  }
+  
+  
+  if (add_sig)
+    selectInput(
+      'barplot_posthoc', 'Select hypothesis test pvalue to annotate on barplot',
+      choices = choices,
+      selected = selected
+    )
+  else
+    NULL
+})
+
+output$barplot_ui <- renderUI({
+  ## only barplot to show
+  req(g_data()$barplot())
+  req(input$barplot_ncol)
+  req(input$dpi)
+  req(input$barplot_width)
+  req(input$barplot_height)
+  
+  print('plot shown barplot')
+  
+  p_list <- g_data()$barplot()
+  ncols <- input$barplot_ncol
+  nrows <- ceiling(length(p_list) / ncols)
+  
+  if (ncols == 1) {
+    ## arrange in 1 column
+    p_shown_list <- p_list
+  } else {
+    p_shown_list <- list(
+      barplot = gridExtra::marrangeGrob(p_list, nrow=nrows, ncol=ncols, top = NULL)
+    )
+  }
+  
+  plot_output_list <- lapply(p_shown_list, function(p) {renderPlot(
+    {
+      grid.newpage()
+      grid.draw(p)
+    },
+    res = as.numeric(input$dpi),
+    width = input$barplot_width,
+    height = input$barplot_height
+  )})
+  
+  print('end plot shown barplot')
+  tagList(plot_output_list)
+})
+
+barplotSaveHandler <- function() {
+  ## g_data()$barplot() stores the top_n plots
+  req(g_data()$d1())
+  req(g_data()$group())
+  req(g_data()$hypothesis_test())
+  
+  print('save barplot')
+  
+  if (input$pair_var == 'None') {
+    pair <- NA
+  } else {
+    pair <- as.factor(g_data()$pair())
+  }
+  
+  ## add jitter
+  add_jitter <- input$barplot_add_jitter
+  ## add point
+  add_point <- input$barplot_add_point
+  ## show significance
+  add_sig <- input$barplot_add_sig
+  
+  ## x label angle
+  x_angle <- input$barplot_x_angle
+  h_just <- input$barplot_hjust
+  v_just <- input$barplot_vjust
+  ## unit
+  unit <- input$unit
+  ## confidence level
+  conf.int <- input$barplot_ci
+  ## ggplot theme
+  ggtheme <- g_data()$ggtheme()
+  font_family <- input$font_family
+  ## number of columns
+  ncols <- input$boxplot_ncol
+  ## number of rows
+  nrows <- ifelse(
+    ncols == 1, 1,
+    ceiling(input$boxplot_top_n / input$boxplot_ncol)
+  )
+  
+  d <- g_data()$d1()
+  g <- g_data()$group()
+  dh <- g_data()$hypothesis_test()
+  
+  posthoc <- NULL
+  if (add_sig) {
+    req(input$barplot_posthoc)
+    posthoc <- input$barplot_posthoc
+  }
+  
+  if (ncols == 1) {
+    w <- input$barplot_width / as.numeric(input$dpi)
+    h <- input$barplot_height / as.numeric(input$dpi)        
+  } else {
+    w <- input$barplot_width / as.numeric(input$dpi) / ncols
+    h <- input$barplot_height / as.numeric(input$dpi) / nrows
+  }
+  
+  n <- ncol(d)
+  
+  ## tmp_report_dir is global variable
+  output_dir <- file.path(tmp_report_dir, my_options$barplot_dir)
+  if(!dir.exists(output_dir)) {
+    dir.create(output_dir, recursive = T)
+  }
+  
+  filename_pdf <- file.path(output_dir, 
+                            paste0(my_options$barplot_prefix, '.pdf'))
+  
+  withProgress({
+    incProgress(1/(n + 1), detail = "Generating figures")
+    
+    p_list <- batch_barplot(d, g, dh, pair,
+                            posthoc = posthoc, unit = unit, 
+                            add_sig = add_sig, x_angle = x_angle, h_just = h_just, v_just = v_just,
+                            add_point = add_point, add_jitter = add_jitter,
+                            as.numeric(conf.int),
+                            ggtheme = ggtheme, font_family = font_family)
+    
+    cairo_pdf(filename_pdf, width = w, height = h, onefile = T)
+    
+    for (i in 1:n) {
+      grid.draw(p_list[[i]])
+      
+      # Increment the progress bar, and update the detail text.
+      incProgress(1/(n + 1), detail = paste("Plotting figure", i))
+    }
+    
+    dev.off()
+  }, value = 0, message = 'Saving barplot to pdf')
+  
+  return()
+}
+
+
+barplotShownSaveHandler <- function() {
+  req(g_data()$barplot())
+  
+  print('save shown barplot')
+  
+  p_list <- g_data()$barplot()
+  ncols <- input$barplot_ncol
+  nrows <- ceiling(length(p_list) / ncols)
+  
+  if (ncols == 1) {
+    ## arrange in 1 column
+    p_shown_list <- p_list
+  } else {
+    p_shown_list <- list(
+      barplot = gridExtra::marrangeGrob(p_list, nrow=nrows, ncol=ncols, top = NULL)
+    )
+  }
+  
+  w <- input$barplot_width / as.numeric(input$dpi)
+  h <- input$barplot_height / as.numeric(input$dpi)
+  dpi <- as.numeric(input$dpi)
+  image_format <- input$image_format
+  
+  ## tmp_report_dir is global variable
+  output_dir <- file.path(tmp_report_dir, my_options$barplot_dir)
+  if(!dir.exists(output_dir)) {
+    dir.create(output_dir, recursive = T)
+  }
+  
+  filename_pdf <- file.path(output_dir,
+                            paste0(my_options$barplot_prefix, '_report.pdf'))
+
+  if (length(p_shown_list) > 0) {
+    cairo_pdf(filename = filename_pdf, width = w, height = h,
+              onefile = T)
+  }
+  
+  withProgress({
+    # cairo_pdf(filename, width = w, height = h, onefile = T)
+    
+    for (i in 1:length(p_shown_list)) {
+      filename_png <- file.path(
+        output_dir,
+        paste0(my_options$barplot_prefix, '_report_', i, '.png'))
+      filename_tiff <- file.path(
+        output_dir,
+        paste0(my_options$barplot_prefix, '_report_', i, '.tiff'))
+      
+      print(p_shown_list[[i]])
+      
+      if (image_format == 'png') {
+        ggsave(filename_png, p_shown_list[[i]], 
+               device = 'png', dpi = dpi,
+               width = w, height = h, units = 'in')
+      } else if (image_format == 'tiff') {
+        ggsave(filename_tiff, p_shown_list[[i]], 
+               device = 'tiff', dpi = dpi,
+               width = w, height = h, units = 'in',
+               compression = 'lzw+p')
+      }
+      
+      # Increment the progress bar, and update the detail text.
+      incProgress(1, detail = paste("Saving shown barplot", i))
+    }
+    
+    dev.off()
+  }, value = 0, message = 'Saving shown barplot')
+  
+  return()
+}
+
+barplot_save <- observeEvent(input$barplot_button, {
+  ## print does not work here
+  barplotSaveHandler()
+  barplotShownSaveHandler()
+})
+```
+
+```{r report}
+output$report_file <- eventReactive(input$generate_report_button, {
+  withProgress({
+    # debug mode will include .RData in zip file
+    # debug <- input$debug
+    language <- input$language
+    report_template <- my_options$report_template[[language]]
+    report_zip <- 'report_tmp.zip'
+    
+    report_dir <- tmp_report_dir
+    
+    print(report_dir)
+    tmp_data <- file.path(report_dir, 'data.RData')
+    
+    ## save all the variables in input
+    input_params <- list()
+    for (x in names(input)) {
+      input_params[[x]] <- input[[x]]
+    }
+    
+    input_params[['heatmapSubplot_params']] <- reactiveValuesToList(heatmapSubplot_params)
+    
+    ## save all the variables in g_data
+    g_data_params <- list()
+    for (x in names(g_data())) {
+      tryCatch(
+        if (!is.null(g_data()[[x]]())) {
+          if (x == 'boxplot') {
+            # g_data_params[[x]] <- g_data()[[x]]()[
+            #     g_data()[['boxplot_shown_id']]()
+            # ]
+          } else if (x == 'barplot') {
+            # g_data_params[[x]] <- g_data()[[x]]()[
+            #     g_data()[['barplot_shown_id']]()
+            # ]
+          } else {
+            g_data_params[[x]] <- g_data()[[x]]()
+          }
+        },
+        error = function(e) {
+          print(e)
+        }
+      )
+    }
+    
+    ## progress:0
+    incProgress(0.3, detail = 'Saving RData...')
+    
+    save(input_params, g_data_params, my_options,
+         file = tmp_data)
+    
+    
+    ## progress:0.4
+    incProgress(0.1, detail = 'Copying report template...')
+    
+    # Copy the report file to a temporary directory before processing it, in
+    # case we don't have write permissions to the current working dir (which
+    # can happen when deployed).
+    
+    tmp_report <- file.path(report_dir, "report.Rmd")
+    file.copy(report_template, tmp_report, overwrite = TRUE)
+    
+    ## progress:0.5
+    incProgress(0.1, detail = 'Copying R scripts...')
+    # copy R script
+    file.copy(file.path(my_options$rscript), report_dir)
+    
+    ## progress:0.6
+    incProgress(0.1, detail = 'Copying bibliography...')
+    # bibliography
+    for (bib in my_options$bib) {
+      file.copy(my_options$bib, report_dir, overwrite = TRUE)
+    }
+    
+    
+    # Set up parameters to pass to Rmd document
+    params <- list(tmp_data = tmp_data)
+    
+    output_file <- file.path(report_dir, 'report.docx')
+    # Knit the document, passing in the `params` list, and eval it in a
+    # child of the global environment (this isolates the code in the document
+    # from the code in this app).
+    
+    ## progress:0.7
+    incProgress(0.3, detail = 'Rendering report')
+    
+    rmarkdown::render(tmp_report, output_file = output_file,
+                      params = params, clean = T,
+                      envir = new.env(parent = globalenv()),
+                      encoding = 'utf8'
+    )
+    
+  }, message = 'Generating report')
+  
+  output$downloadButton_ui <- renderUI({
+    downloadButton("report", "Download report")
+  })
+  
+  ''
+})
+
+
+
+output$report <- downloadHandler(
+  # For PDF output, change this to "report.pdf"
+  filename <- "report.zip",
+  
+  content = function(file) {
+    ## debug mode
+    debug <- input$debug
+    
+    withProgress({
+      incProgress(0.2, detail = 'Zipping report contents...')
+      
+      tmp_zip <- file.path(tmp_dir, 'report.zip')
+      if (file.exists(tmp_zip))
+        file.remove(tmp_zip)
+      
+      if (Sys.info()['sysname'] == 'Windows') {
+        print(paste('cd', tmp_dir, '& zip -r', file, 'report -x \\*.R \\*.Rmd \\*.bib'))
+        cwd <- getwd()
+        setwd(tmp_dir)
+        if (debug)
+          zip(zipfile = file, files = 'report', flags = '-r', 
+              extras = '-x \\*.R \\*.Rmd \\*.bib')
+        else
+          zip(zipfile = file, files = 'report', flags = '-r', 
+              extras = '-x \\*.R \\*.Rmd \\*.bib \\*.RData')
+        setwd(cwd)
+        
+      } else {## linux
+        if (debug)
+          system(paste('cd', tmp_dir, '; zip -r', file, 'report -x \\*.R \\*.Rmd \\*.bib'))
+        else
+          system(paste('cd', tmp_dir, '; zip -r', file, 'report -x \\*.R \\*.Rmd \\*.bib \\*.RData'))
+      }
+      
+    }, message = 'Zipping files')
+  },
+  
+  contentType = 'application/zip'
+)
+
+exportFiguresAsPdf <- observeEvent(input$export_figures_button, {
+  ## export data.csv, sample.csv, var.csv
+  exportDataCSV()
+  ## data summary: summary1.csv
+  metabolitesStatisticsCSVHandler()
+  ## PCA: PCA_contrib.csv, PCA_eig.csv, PCA_ind.csv
+  pcaCSVSaveHandler()
+  ## OPLSDA: VIP.csv
+  oplsdaCSVSaveHandler()
+  ## hypothesis_test.csv
+  hypothesisTestCSVSaveHandler()
+  
+  print('End export')
+  ## save input
+  sink(file.path(tmp_report_dir, 'input.txt'))
+  print(reactiveValuesToList(input))
+  sink()
+  
+  tryCatch(
+    metabolitesStatisticsSaveHandler(),
+    error = function(e) {
+      print('metabolitesStatisticsSaveHandler error')
+      print(e$message)
+    }
+  )
+  
+  tryCatch(
+    omeSummarySaveHandler(),
+    error = function(e) {
+      print('omeSummarySaveHandler error')
+      print(e$message)
+    }
+  )
+  
+  tryCatch(
+    pcaScreeSaveHandler(),
+    error = function(e) {
+      print('pcaScreeSaveHandler error')
+      print(e$message)
+    }
+  )
+
+  tryCatch(
+    pcaIndSaveHandler(),
+    error = function(e) {
+      print('pcaIndSaveHandler error')
+      print(e$message)
+    }
+  )  
+  
+  tryCatch(
+    heatmapSaveHandler(),
+    error = function(e) {
+      print('heatmapSaveHandler error')
+      print(e$message)
+    }
+  )  
+  
+  tryCatch(
+    heatmapSubplotSaveHandler(),
+    error = function(e) { print('heatmap subplot not generated')}
+  )
+  
+  tryCatch(
+    oplsdaSaveHandler(),
+    error = function(e) {
+      print('oplsdaSaveHandler error')
+      print(e$message)
+    }
+  )  
+  
+  tryCatch(
+    volcanoSaveHandler(),
+    error = function(e) {
+      print('volcanoSaveHandler error')
+      print(e$message)
+    }
+  )
+  
+  tryCatch(
+    differentialMetabolitesSaveHandler(),
+    error = function(e) {
+      print('differentialMetabolitesSaveHandler error')
+      print(e$message)
+    }
+  )  
+  
+  tryCatch(
+    boxplotShownSaveHandler(),
+    error = function(e) {
+      print('boxplotShownSaveHandler error')
+      print(e$message)
+    }
+  )
+  
+  tryCatch(
+    boxplotSaveHandler(),
+    error = function(e) {
+      print('boxplotSaveHandler error')
+      print(e$message)
+    }
+  )
+  
+  tryCatch(
+    barplotShownSaveHandler(),
+    error = function(e) {
+      print('barplotShownSaveHandler error')
+      print(e$message)
+    }
+  )
+  
+  tryCatch(
+    barplotSaveHandler(),
+    error = function(e) {
+      print('barplotSaveHandler error')
+      print(e$message)
+    }
+  )
+  
+
+})
+```
+
+```{r, include=F, eval=F}
+pdf figure not exactly the same as png even when all the settings are the same
+
+https://stackoverflow.com/questions/28587498/post-hoc-tests-for-one-way-anova-with-welchs-correction-in-r
+https://stats.stackexchange.com/questions/83941/games-howell-post-hoc-test-in-r
+```

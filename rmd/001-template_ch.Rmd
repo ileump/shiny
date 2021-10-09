@@ -1,0 +1,314 @@
+---
+title: "数据分析报告"
+output:
+  word_document: default
+bibliography: bibliography.bib
+params:
+  tmp_data: NA
+---
+
+```{r setup, include=FALSE}
+# library(checkpoint)
+# options(checkpoint.mranUrl = 'http://mran.microsoft.com/snapshot')
+# checkpoint(
+#     snapshotDate = '2018-06-01',
+#     R.version = '3.5.0',
+#     checkpointLocation = '~/R',
+#     forceInstall = FALSE,
+#     scanForPackages = FALSE,
+#     project = getwd()
+# )
+
+knitr::opts_chunk$set(echo = F, dpi = 100)
+
+
+library(magrittr)
+library(plyr)
+library(ggplot2)
+```
+
+```{r}
+## Expected variables in the RData file 
+## input_params, g_data_params, my_options
+# load('/tmp/RtmpIPK81d/report/data.RData')
+load(params$tmp_data)
+input <- input_params
+g_data <- g_data_params
+```
+
+## 数据转换
+
+```{r}
+write.csv(g_data$summary1,
+          file = 'summary1.csv',
+          row.names = T)
+```
+
+Yes/No表示该项数据转换是否执行。
+
+- [`r ifelse(input$preprocess_handle_missing, 'Yes', 'No')`] 替换缺失值 (0或者空缺)，替换为最小数的1/2
+- [`r ifelse(input$preprocess_log, 'Yes', 'No')`] 对数变换
+- [`r ifelse(input$preprocess_sd, 'Yes', 'No')`] 方差归一化
+
+数据摘要信息保存在summary1.csv。
+
+## 主成分分析（Principal Component Analysis, PCA）
+
+变量很多的数据集当中，通常很多的变量之间会有一定的相关性。因此可以通过一些转换来降低数据的维度并能保留大部分原始数据的信息。主成分分析是一种常用的降维方法，通过找到一组互相不相关新变量来最大化表达原有数据的信息，让转换得到的数据更容易可视化和理解。
+
+```{r pca_scree, fig.width=input$pca_scree_width / my_options$dpi, fig.height=input$pca_scree_height / my_options$dpi, fig.cap = sprintf('左上碎石图显示主成分解释X变量方差的比例。一般会保留图形变化最大之处之上的主成分，也就是图形平滑之前的部分。其它的载荷图显示了在每个主成分上的载荷最高的前%d个变量，载荷反映了变量和主成分之间的相关系数。', input$pca_scree_top_n)}
+# d <- g_data()$d1()
+# g <- factor(g_data()$d2()[, 1])
+NPC <- input$pca_npc
+# 
+# testthat::expect_equal(rownames(d), rownames(g_data()$d2()))
+#  
+# pca <- FactoMineR::PCA(d, scale.unit = TRUE, graph = FALSE)
+pca <- g_data$pca
+top_n <- input$pca_scree_top_n
+
+scree.plot <- factoextra::fviz_screeplot(
+    pca, addlabels = TRUE)
+
+## Contributions of variables to PC1 to PC#NCP
+lst.plot <- lapply(1:NPC, function(x) {
+    factoextra::fviz_contrib(pca, choice = "var", xtickslab.rt = 80,
+                             axes = x, top = top_n)
+})
+
+## put scree.plot and lst.plot in one list to apply grid.arrange
+lst.all <- vector(mode = 'list', length = 1 + length(lst.plot))
+lst.all[[1]] <- scree.plot
+lst.all[2:length(lst.all)] <- lst.plot
+
+do.call(purrr::partial(gridExtra::grid.arrange, ncol = 2), lst.all)
+```
+
+```{r pca_ind, fig.width=input$pca_ind_width / my_options$dpi, fig.height=input$pca_ind_height / my_options$dpi, fig.cap = '主成分得分图。X/Y轴上的百分比指的是该主成分解释的方差比例。'}
+npc <- as.numeric(input$pca_npc)
+g <- as.factor(g_data$d2[, input$pca_ind_group])
+pca <- g_data$pca
+
+comps <- list()
+for (i in 1:(npc - 1)) {
+    for (j in (i+1) : npc)
+        comps[[length(comps) + 1]] <- c(i, j)
+}
+
+l_ply(comps, function(x) {
+    factoextra::fviz_pca_ind(
+        pca, axes = x,
+        repel = FALSE, # hide individual labels
+        habillage = g, # color by groups
+        # palette = cbPalette,
+        addEllipses = input$pca_ellipse, # Concentration ellipses
+        title = ''
+    ) %>% print
+})
+```
+
+
+## 聚类和热图 (Clustering & Heatmap)
+
+**参数**
+
+- 翻转数据 [`r ifelse(input$heatmap_rotate, 'Yes', 'No')`]
+- 行或列的归一化（减去均值再除以方差）[`r input$heatmap_scale`]
+
+```{r heatmap, fig.width=input$heatmap_width / my_options$dpi, fig.height=input$heatmap_height / my_options$dpi, fig.cap = 'Heatmap & clustering'}
+# print(g_data$heatmap)
+draw(g_data$heatmap, 
+     merge_legends = T,
+     align_heatmap_legend = 'heatmap_top',
+     legend_grouping = 'original'
+     )
+```
+
+热图的尺寸如果太大，在word文档里面不能很好的显示，可以查看`r my_options$heatmap_filename`中的矢量图。
+
+## 正交偏最小二乘判别分析 (Orthogonal Projection to Latent Structures Discriminant Analysis, OPLS-DA)
+
+OPLS[@Trygg2002]方法能够将X变量中与Y变量相关的变量集中在第一个主成分中，而其它的正交成分和Y无相关性，仅反映X中的内部结构。这样仅有一个成分用于预测，更容易理解和可视化。
+
+
+右下房的OPLS-DA得分图显示的是样本在预测成分（x轴）和正交成分（y轴）维度上的分布和分组的分布区间（Mahalanobis ellipse）。
+
+R2X, R2Y分别是模型对X变量的解释性和Y变量的解释性，完全解释则数值为１。Q2Y是模型的预测性，最大值为１。
+
+左上图表示的是随机置换Y以后得到的模型结果（用点表示）与原有模型结果（用两条水平线表示）的比较。P值是随机置换模型取得更高R2Y/Q2Y得分的比例。原有模型的R2Y和Q2Y如果明显好于随机置换后的结果，表明模型拟合得很好。如果研究样本量小于变量个数,或者随机置换的模型指标接近原有模型，容易有过拟合的问题，结果解读需谨慎。左下方的图会把距离样本分布区域中心较远的值标注出来，可能是潜在的异常值。
+
+```{r, results='asis', fig.width=input$plsda_width / my_options$dpi, fig.height=input$plsda_height / my_options$dpi}
+plsda_list <- g_data$plsda
+
+if(length(plsda_list) > 0) {
+    l_ply(plsda_list, function(plsda) {
+        
+        cat('#### ', paste0(levels(attr(plsda, 'suppLs')$y),
+                   collapse = '-'), '\n\n')
+            
+        if (inherits(plsda, 'error')) {
+            cat(plsda$message)
+        } else {
+            
+            
+            ## OPLS-DA result summary
+            par(mfrow = c(2, 2))
+            ropls::plot(plsda, typeVc = 'permutation', parDevNewL = F)
+            ropls::plot(plsda, typeVc = 'overview', parDevNewL = F)
+            ropls::plot(plsda, typeVc = 'outlier', parDevNewL = F)
+            ropls::plot(plsda, typeVc = 'x-score', parDevNewL = F)
+            par(mfrow = c(1, 1))
+            
+        }
+        ## VIP score table
+        # knitr::kable(
+        #     data.frame(VIP = sort(attr(plsda, 'vipVn'), decreasing = T))[1:10, ],
+        #     caption = 'Top 10 VIP score measuring variable importance in prediction.',
+        #     format = 'markdown'
+        # ) %>% print
+        
+        ## ROC
+        # pROC::plot.roc(pROC::roc(attr(plsda, 'suppL')$y, 
+        #                          attr(plsda, 'scoreMN')[, 1]),
+        #                print.auc = T)
+    }
+    )
+}
+```
+
+
+```{r, results='asis', fig.width=input$plsda_roc_width / my_options$dpi, fig.height=input$plsda_roc_height / my_options$dpi}
+plsda_list <- g_data$plsda
+
+if(length(plsda_list) > 0) {
+    l_ply(plsda_list, function(plsda) {
+        
+        cat('#### ROC: ', paste0(levels(attr(plsda, 'suppLs')$y),
+                   collapse = '-'), '\n')
+            
+         
+        ## OPLS-DA result summary
+        # par(mfrow = c(2, 2))
+        # ropls::plot(plsda, typeVc = 'permutation', parDevNewL = F)
+        # ropls::plot(plsda, typeVc = 'overview', parDevNewL = F)
+        # ropls::plot(plsda, typeVc = 'outlier', parDevNewL = F)
+        # ropls::plot(plsda, typeVc = 'x-score', parDevNewL = F)
+        # par(mfrow = c(1, 1))
+            
+        
+        ## VIP score table
+        # knitr::kable(
+        #     data.frame(VIP = sort(attr(plsda, 'vipVn'), decreasing = T))[1:10, ],
+        #     caption = 'Top 10 VIP score measuring variable importance in prediction.',
+        #     format = 'markdown'
+        # ) %>% print
+        if (!inherits(plsda, 'error')) {
+            write.csv(
+                data.frame(VIP = sort(attr(plsda, 'vipVn'), decreasing = T)),
+                file = paste0('VIP_', 
+                              paste0(levels(attr(plsda, 'suppLs')$y), collapse = '-'),
+                              '.csv'),
+                row.names = T
+            )
+            ## ROC
+            pROC::plot.roc(pROC::roc(attr(plsda, 'suppL')$y, 
+                                     attr(plsda, 'scoreMN')[, 1]),
+                           print.auc = T)
+        }
+    }
+    )
+}
+```
+
+OPLS模型的全部变量VIP得分保存在“VIP_分组１－分组２.csv”文件中.
+
+## 假设检验 (Hypothesis Testing)
+
+
+这里同时做了参数和非参数假设检验。具体的假设检验方法依赖于两个因素（１）是否配对；（２）２个分组或者是多个分组。
+
+如果仅有２个分组，配对的情况下会使用参数检验paired t-test或者非参数检验signed rank test；非配对的数据会使用参数检验t-test和非参数检验Man-Whitney-U test。
+
+大于２个分组的情况下使用的是Welch’s ANOVA检验来比较多个分组的均值，相比单因素方差分析(One-way ANOVA)，它不要求不同分组间的方差相同。然后post-hoc检验会用Tukey's HSD和Game-Howell检验来比较每两组之间的均值。非参数检验会使用Kruskal-Wallis test ，然后post-hoc检验会使用Dunnett’s test给出两两分组之间的比较。
+
+倍数变化(fold change)的计算在配对和不配对的情况下是不同的。配对的情况下，会得到所有配对之间的倍数变化的中位数。而在不配对的时候，会得到两组的平均数之间的倍数。
+
+|分组个数|是否配对|参数检验     |参数post-hoc检验|非参数检验|非参数post-hoc检验|
+|--------|------|-------------|----------------|----------------|------------------|
+|2　|配对　|paired t-test|                |Signed rank test|
+|2　|不配对|t-test       |                |Man-Whiteney-U test|         |
+|>2　|不配对|Welch's ANOVA|Tukey's HSD/Games-Howell test|Kruskal-Wallis test|Dunn's test|
+
+
+```{r, results='asis'}
+if (input$pair_var != 'None') {
+    ## paired
+    cat('本研究为配对的２个分组，使用的假设检验是参数检验paired t-test和非参数检验signed rank test。\n')
+} else if (nlevels(g_data$group) == 2) {
+    cat('本研究为非配对的２个分组，使用的假设检验是参数检验t-test和非参数检验Man-Whitney-U test。\n')
+} else if (nlevels(g_data$group) > 2) {
+    cat('本研究为非配对的大于２个分组，使用的假设检验是参数检验Welch\'s ANOVA 和非参数检验Kruskal-Wallis test。Post-hoc 检验是参数检验Tukey\'s HSD test，Games-Howell test和非参检验Dunnett\'s test。\n')
+}
+```
+
+假设检验的结果保存在"hypothesis_test.csv"。
+
+```{r}
+if(!is.null(g_data$hypothesis_test))
+    write.csv(
+        g_data$hypothesis_test,
+        file = 'hypothesis_test.csv',
+        row.names = T
+    )
+```
+
+## 火山图 (Volcano plot)
+
+```{r volcano, fig.width=input$volcano_width / my_options$dpi, fig.height=input$volcano_height / my_options$dpi, fig.cap=sprintf('火山图同时显示每个变量的P值和倍数变化。超过设定的阈值的变量会被标注出来。P值采用%s。', input$volcano_p)}
+p_list <- g_data$volcano
+if (length(p_list) > 0)
+    l_ply(p_list, print)
+```
+
+## 箱形图 (Boxplot)
+
+```{r boxplot, fig.width=input$boxplot_width / my_options$dpi, fig.height=input$boxplot_height / my_options$dpi, fig.cap=sprintf('前%d个最显著的代谢物的箱形图。P值采用%s。', input$boxplot_top_n, input$boxplot_posthoc)}
+dh <- g_data$hypothesis_test
+p_list <- g_data$boxplot
+top_n <- min(input$boxplot_top_n, length(p_list))
+   
+if (!is.null(dh)) {
+    p_rank <- order(dh[, 'pvalue'])
+    l_ply(p_list[p_rank[1:top_n]], print)
+} else {
+    l_ply(p_list[1:top_n], print)
+}
+```
+
+全部的箱形图保存在`r my_options$boxplot_filename`.
+
+## 柱状图 (Barplot)
+
+```{r barplot, fig.width=input$barplot_width / my_options$dpi, fig.height=input$barplot_height / my_options$dpi, fig.cap=sprintf('前%d个最显著的代谢物的柱状图。P值采用%s。', input$barplot_top_n, input$boxplot_posthoc)}
+dh <- g_data$hypothesis_test
+
+p_list <- g_data$barplot
+top_n <- min(input$barplot_top_n, length(p_list))
+
+if (!is.null(dh)) {
+    p_rank <- order(dh[, 'pvalue'])
+    
+    l_ply(p_list[p_rank[1:top_n]], print)
+} else {
+    l_ply(p_list[1:top_n], print)
+}
+```
+
+全部的柱状图保存在 `r my_options$barplot_filename`.
+
+
+```{r}
+writeLines(capture.output(sessionInfo()), "sessionInfo.txt")
+```
+
+## 参考文献

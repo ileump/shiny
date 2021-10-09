@@ -1,0 +1,64 @@
+---
+title: "Manual"
+output: html_document
+runtime: shiny
+---
+
+
+## Convert pdf to raster image
+
+ImageMagick is required to convert pdf to raster images in png, jpg or tiff format. png is recommended because of much smaller file size than tiff and better quality than jpg. ImageMagick can be downloaded from https://imagemagick.org/script/download.php. 
+
+Modify /etc/ImageMagick6/policy.xml. 
+
+
+**Increase resources**
+
+```markdown
+<policy domain="resource" name="memory" value="2560MiB"/>
+<policy domain="resource" name="disk" value="10GiB"/>
+```
+
+**Permission**
+
+```markdown
+<!-- policy domain="coder" rights="none" pattern="PS" / -->
+<!-- policy domain="coder" rights="none" pattern="EPI" / -->
+<!-- policy domain="coder" rights="none" pattern="PDF" / -->
+<!-- policy domain="coder" rights="none" pattern="XPS" / -->
+```
+
+
+```{shell, eval=F}
+for file in *.pdf
+do
+  echo "$file"
+  convert -density 300 "$file" "img/${file%.pdf}%d.png"
+  #convert -density 300 volcano.pdf -background white -flatten -compress lzw volcano.tiff
+  # convert -density 300 chord.pdf -alpha remove -compress lzw chord_%d.tiff
+done
+
+find . -name \*.pdf -exec bash -c 'convert -density 300 $1 -alpha remove -compress lzw "${1/\.pdf/_%d\.tiff}"' bash {} \;
+
+find . -name \*.pdf -exec bash -c 'convert -density 300 $1 -alpha remove -compress lzw "${1/\.pdf/_%d\.jpg}"' bash {} \;
+
+```
+
+## Fonts
+
+System fonts were made available to R using extrafont package.
+
+## Theme
+
+- theme_gray: The signature ggplot2 theme with a grey background and white gridlines, designed to put the data forward yet make comparisons easy.
+- theme_bw: The classic dark-on-light ggplot2 theme. May work better for presentations displayed with a projector.
+- theme_linedraw: A theme with only black lines of various widths on white backgrounds, reminiscent of a line drawings. Serves a purpose similar to theme_bw. Note that this theme has some very thin lines (<< 1 pt) which some journals may refuse.
+- theme_light: A theme similar to theme_linedraw but with light grey lines and axes, to direct more attention towards the data.
+-theme_dark: The dark cousin of theme_light, with similar line sizes but a dark background. Useful to make thin coloured lines pop out.
+- theme_minimal: A minimalistic theme with no background annotations.
+- theme_classic: A classic-looking theme, with x and y axis lines and no gridlines.
+- theme_pubr: Create a publication ready theme
+- theme_pubclean: a clean theme without axis lines, to direct more attention to the data.
+- labs_pubr: Format only plot labels to a publication ready style
+- theme_classic2: Create a classic theme with axis lines.
+- clean_theme: Remove axis lines, ticks, texts and titles.

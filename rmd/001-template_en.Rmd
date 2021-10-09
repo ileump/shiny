@@ -1,0 +1,304 @@
+---
+title: "Statistical report"
+output:
+  word_document: default
+bibliography: bibliography.bib
+params:
+  tmp_data: NA
+---
+
+```{r setup, include=FALSE}
+# library(checkpoint)
+# options(checkpoint.mranUrl = 'http://mran.microsoft.com/snapshot')
+# checkpoint(
+#     snapshotDate = '2018-06-01',
+#     R.version = '3.5.0',
+#     checkpointLocation = '~/R',
+#     forceInstall = FALSE,
+#     scanForPackages = FALSE,
+#     project = getwd()
+# )
+
+knitr::opts_chunk$set(echo = F, dpi = 100)
+
+
+library(magrittr)
+library(plyr)
+library(ggplot2)
+```
+
+```{r}
+## Expected variables in the RData file 
+## input_params, g_data_params, my_options
+# load('/tmp/RtmpIPK81d/report/data.RData')
+load(params$tmp_data)
+input <- input_params
+g_data <- g_data_params
+```
+
+## Data transformation
+
+```{r}
+write.csv(g_data$summary1,
+          file = 'summary1.csv',
+          row.names = T)
+```
+
+- [`r ifelse(input$preprocess_handle_missing, 'Yes', 'No')`] Replace missing values (0 or blank) by half of global minimum
+- [`r ifelse(input$preprocess_log, 'Yes', 'No')`] Log transformation
+- [`r ifelse(input$preprocess_sd, 'Yes', 'No')`] Unit variance normalization
+
+Summary of data file is saved to summary1.csv.
+
+## Principal Component Analysis
+
+In high-dimensional data analysis, it is common that many variables are correlated. So it is possible to reduce its dimension without losing much information.  Principal component analysis (PCA) is a widely used dimension reduction method that identity a small new set of independent variables that best represent the information of the original data, so that the transformed data is easier to visualize and interpret.
+
+```{r pca_scree, fig.width=input$pca_scree_width / my_options$dpi, fig.height=input$pca_scree_height / my_options$dpi, fig.cap = sprintf('The top-left panel is scree plot which shows percentage variance explained by each component. The rest shows the top %d variables that have the highest contribution to each principal component.', input$pca_scree_top_n)}
+# d <- g_data()$d1()
+# g <- factor(g_data()$d2()[, 1])
+NPC <- input$pca_npc
+# 
+# testthat::expect_equal(rownames(d), rownames(g_data()$d2()))
+#  
+# pca <- FactoMineR::PCA(d, scale.unit = TRUE, graph = FALSE)
+pca <- g_data$pca
+top_n <- input$pca_scree_top_n
+
+scree.plot <- factoextra::fviz_screeplot(
+    pca, addlabels = TRUE)
+
+## Contributions of variables to PC1 to PC#NCP
+lst.plot <- lapply(1:NPC, function(x) {
+    factoextra::fviz_contrib(pca, choice = "var", xtickslab.rt = 80,
+                             axes = x, top = top_n)
+})
+
+## put scree.plot and lst.plot in one list to apply grid.arrange
+lst.all <- vector(mode = 'list', length = 1 + length(lst.plot))
+lst.all[[1]] <- scree.plot
+lst.all[2:length(lst.all)] <- lst.plot
+
+do.call(purrr::partial(gridExtra::grid.arrange, ncol = 2), lst.all)
+```
+
+```{r pca_ind, fig.width=input$pca_ind_width / my_options$dpi, fig.height=input$pca_ind_height / my_options$dpi, fig.cap = 'PCA score plot. The percentage in axis label indicates how much variance in X can be explained by that component.'}
+npc <- as.numeric(input$pca_npc)
+g <- as.factor(g_data$d2[, input$pca_ind_group])
+pca <- g_data$pca
+
+comps <- list()
+for (i in 1:(npc - 1)) {
+    for (j in (i+1) : npc)
+        comps[[length(comps) + 1]] <- c(i, j)
+}
+
+l_ply(comps, function(x) {
+    factoextra::fviz_pca_ind(
+        pca, axes = x,
+        repel = FALSE, # hide individual labels
+        habillage = g, # color by groups
+        # palette = cbPalette,
+        addEllipses = input$pca_ellipse, # Concentration ellipses
+        title = ''
+    ) %>% print
+})
+```
+
+
+## Clustering & Heatmap
+
+**Parameters**
+
+- Rotated [`r ifelse(input$heatmap_rotate, 'Yes', 'No')`]
+- Scaled on [`r input$heatmap_scale`]
+
+```{r heatmap, fig.width=input$heatmap_width / my_options$dpi, fig.height=input$heatmap_height / my_options$dpi, fig.cap = 'Heatmap & clustering'}
+# print(g_data$heatmap)
+draw(g_data$heatmap, 
+     merge_legends = T,
+     align_heatmap_legend = 'heatmap_top',
+     legend_grouping = 'original'
+     )
+```
+
+If the size of heatmap is too big to display properly here in this word document, find the vector image in `r my_options$heatmap_filename`.
+
+## Orthogonal Projection to Latent Structures Discriminant Analysis (OPLS-DA)
+
+OPLS[@Trygg2002] removes variations from X that is uncorrelated to Y. In mathematical terms this is equivalent to removing systematic variations that is orthogonal to Y. Only one predictive component is produced, making it easy to visualize and interpret.
+
+Bottom-right panel shows sample score in predictive component (X axis) and orthogonal component (Y axis) and Mahalanobis ellipse of each group.
+
+R2X, R2Y are percentage of explained variance in X and Y. Q2Y is the measure of predictive performance of the full model.
+
+Top-left panel shows the significance of the model by comparing with models built after permutation of Y values. The two horizontal lines indicate R2Y and Q2Y of the full model and other points indicate R2Y and Q2Y of permuted models. P value is determined as the proportion of permuted models scored better in R2Y/Q2Y than the full model. If the model is well fitted we should see the full model scores much better than permuted models. If the sample size is less than number of variables or scores of permuted models are very close to the full model, we should be concerned about possible model over-fitting. Bottom-left panel labels potential outliers that locate far from group centers.
+
+
+```{r, results='asis', fig.width=input$plsda_width / my_options$dpi, fig.height=input$plsda_height / my_options$dpi}
+plsda_list <- g_data$plsda
+
+if(length(plsda_list) > 0) {
+    l_ply(plsda_list, function(plsda) {
+        
+        cat('#### ', paste0(levels(attr(plsda, 'suppLs')$y),
+                   collapse = '-'), '\n\n')
+            
+        if (inherits(plsda, 'error')) {
+            cat(plsda$message)
+        } else {
+            
+            
+            ## OPLS-DA result summary
+            par(mfrow = c(2, 2))
+            ropls::plot(plsda, typeVc = 'permutation', parDevNewL = F)
+            ropls::plot(plsda, typeVc = 'overview', parDevNewL = F)
+            ropls::plot(plsda, typeVc = 'outlier', parDevNewL = F)
+            ropls::plot(plsda, typeVc = 'x-score', parDevNewL = F)
+            par(mfrow = c(1, 1))
+            
+        }
+        ## VIP score table
+        # knitr::kable(
+        #     data.frame(VIP = sort(attr(plsda, 'vipVn'), decreasing = T))[1:10, ],
+        #     caption = 'Top 10 VIP score measuring variable importance in prediction.',
+        #     format = 'markdown'
+        # ) %>% print
+        
+        ## ROC
+        # pROC::plot.roc(pROC::roc(attr(plsda, 'suppL')$y, 
+        #                          attr(plsda, 'scoreMN')[, 1]),
+        #                print.auc = T)
+    }
+    )
+}
+```
+
+
+```{r, results='asis', fig.width=input$plsda_roc_width / my_options$dpi, fig.height=input$plsda_roc_height / my_options$dpi}
+plsda_list <- g_data$plsda
+
+if(length(plsda_list) > 0) {
+    l_ply(plsda_list, function(plsda) {
+        
+        cat('#### ', paste0(levels(attr(plsda, 'suppLs')$y),
+                   collapse = '-'))
+            
+         
+        ## OPLS-DA result summary
+        # par(mfrow = c(2, 2))
+        # ropls::plot(plsda, typeVc = 'permutation', parDevNewL = F)
+        # ropls::plot(plsda, typeVc = 'overview', parDevNewL = F)
+        # ropls::plot(plsda, typeVc = 'outlier', parDevNewL = F)
+        # ropls::plot(plsda, typeVc = 'x-score', parDevNewL = F)
+        # par(mfrow = c(1, 1))
+            
+        
+      ## VIP score table
+        # knitr::kable(
+        #     data.frame(VIP = sort(attr(plsda, 'vipVn'), decreasing = T))[1:10, ],
+        #     caption = 'Top 10 VIP score measuring variable importance in prediction.',
+        #     format = 'markdown'
+        # ) %>% print
+        if (!inherits(plsda, 'error')) {
+            write.csv(
+                data.frame(VIP = sort(attr(plsda, 'vipVn'), decreasing = T)),
+                file = paste0('VIP_', 
+                              paste0(levels(attr(plsda, 'suppLs')$y), collapse = '-'),
+                              '.csv'),
+                row.names = T
+            )
+            ## ROC
+            pROC::plot.roc(pROC::roc(attr(plsda, 'suppL')$y, 
+                                     attr(plsda, 'scoreMN')[, 1]),
+                           print.auc = T)
+        }
+    }
+    )
+}
+```
+
+VIP score of OPLS is saved as "VIP_group1-group2.csv".
+
+## Hypothesis testing
+
+Here, both parametric and non-parametric test are performed. The choice of hypothesis test method depends on two factors: (1) is the study paired/matched; (2) are there more than 2 groups.
+
+When there are 2 groups, paired t-test (parametric) and signed rank test (non-parametric) is performed when the study is paired/matched; otherwise, t-test (parametric) and Man-Whitney-U test is performed.
+
+When there are more than 2 groups, Welch's ANOVA is applied to compare the group means. In comparison with one-way ANOVA, it does not assume homogeneity of variance among different groups. Then Tukey's HSD test and Game-Howell test are performed for post-hoc group-wise comparison. The non-parametric test used is Kruskal-Wallis test, then Dunnett's test is applied for post-hoc group-wise comparison. 
+
+Fold change is calculated differently when the study is paired or non-paired. It is calculated as the median of pair-wise fold change when the study is paired, or fold change of group means when the study is not paired.
+
+```{r, results='asis'}
+if (input$pair_var != 'None') {
+    ## paired
+    cat('This study is paired and has 2 groups. Paired t-test (parametric) and signed rank test (non-parametric) were performed.')
+} else if (nlevels(g_data$group) == 2) {
+    cat('This study is non-paired and has 2 groups. T-test (parametric) and Man-Whitney-U test were performed.')
+} else if (nlevels(g_data$group) > 2) {
+    cat('This study is non-paired and has more than 2 groups. Welch\'s ANOVA (parametric) and Kruskal-Wallis test were performed. Parametric post-hoc test Tukey\'s HSD test and Games-Howell test were performed. Non-parametric post-hoc test Dunnett\'s test was performed.')
+}
+```
+
+Hypothesis test result is saved as [hypothesis_test.csv].
+
+```{r}
+if(!is.null(g_data$hypothesis_test))
+    write.csv(
+        g_data$hypothesis_test,
+        file = 'hypothesis_test.csv',
+        row.names = T
+    )
+```
+
+## Volcano plot
+
+```{r volcano, fig.width=input$volcano_width / my_options$dpi, fig.height=input$volcano_height / my_options$dpi, fig.cap='Volcano plot shows both p value from hypothesis test and fold change. Variables that are above the cut-off values are labeled.'}
+p_list <- g_data$volcano
+if (length(p_list) > 0)
+    l_ply(p_list, print)
+```
+
+## Boxplot
+
+```{r boxplot, fig.width=input$boxplot_width / my_options$dpi, fig.height=input$boxplot_height / my_options$dpi, fig.cap=sprintf('Boxplot of top %d most significant species', input$boxplot_top_n)}
+dh <- g_data$hypothesis_test
+p_list <- g_data$boxplot
+top_n <- min(input$boxplot_top_n, length(p_list))
+   
+if (!is.null(dh)) {
+    p_rank <- order(dh[, 'pvalue'])
+    l_ply(p_list[p_rank[1:top_n]], print)
+} else {
+    l_ply(p_list[1:top_n], print)
+}
+```
+
+Boxplot of all the species are saved to `r my_options$boxplot_filename`.
+
+## Barplot
+
+```{r barplot, fig.width=input$barplot_width / my_options$dpi, fig.height=input$barplot_height / my_options$dpi, fig.cap=sprintf('barplot of top %d most significant species', input$barplot_top_n)}
+dh <- g_data$hypothesis_test
+
+p_list <- g_data$barplot
+top_n <- min(input$barplot_top_n, length(p_list))
+
+if (!is.null(dh)) {
+    p_rank <- order(dh[, 'pvalue'])
+    
+    l_ply(p_list[p_rank[1:top_n]], print)
+} else {
+    l_ply(p_list[1:top_n], print)
+}
+```
+
+Boxplot of all the species are saved to `r my_options$barplot_filename`.
+
+
+```{r}
+writeLines(capture.output(sessionInfo()), "sessionInfo.txt")
+```
+
+## Reference

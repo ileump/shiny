@@ -1,0 +1,134 @@
+---
+title: "README"
+output: html_document
+---
+
+
+## sshd
+
+vim /etc/ssh/sshd_config
+And be sure this options are set:
+
+ClientAliveInterval 60
+ClientAliveCountMax 0
+
+
+## Setup
+
+```{sh}
+# rgl<-mixOmics
+apt install xorg libx11-dev libglu1-mesa-dev
+# gsl <- userfrienndly
+apt install libgsl-dev libxml2-dev
+
+## animation requires imagemagick
+sudo apt install libmagick++-6.q16-dev
+
+## fonts
+add-apt-repository multiverse
+apt update
+apt install ttf-mscorefonts-installer
+
+## metaboanalystr
+apt install libnetcdf-dev
+```
+
+## R packages
+
+- mixOmics: spls.
+- multcompView: Posthoc-test significance label.
+- fs: path_sanitize
+
+OpenMx compilation 
+
+```
+# sudo vim /opt/microsoft/ropen/3.5.3/lib64/R/etc/Makeconf
+CXX14 = g++
+CXX14FLAGS = -DU_STATIC_IMPLEMENTATION -g -O2
+CXX14PICFLAGS = -fpic
+CXX14STD = -std=gnu++14
+```
+
+
+```{r}
+
+pkgs <- c(
+    'fs', 'pdftools', 'tiff', 'readr',
+    'extrafont',
+    'FactoMineR', 'factoextra', 'broom', 'data.table', 'dunn.test',
+    'DT', 
+    'dplyr', 'ggpubr', 'ggrepel', 'ggplot2', 'ggsignif', 'animation',
+    'gridExtra', 'igraph', 'knitr', 'magrittr', 'Hmisc',
+    'markdown', 'rmarkdown', 'rprojroot', 'multcompView', 'pander', 'pheatmap',
+    'shiny', 'tableone', 'testthat', 'tidyr', 'userfriendlyscience', 'FSA',
+    'caret', 'pROC',
+    'BiocManager')
+
+pkgs <- pkgs[!pkgs %in% installed.packages()]
+install.packages(pkgs, repos = 'https://mirrors.tuna.tsinghua.edu.cn/CRAN')
+```
+
+```{shell}
+R CMD config CXX11
+echo $(R RHOME)/etc/Makeconf
+```
+
+## Bioconductor mirror
+
+```{r, eval=F, echo=T}
+# options(BioC_mirror="https://mirrors.tuna.tsinghua.edu.cn/bioconductor")
+chooseBioCmirror()
+BiocManager::install(c('mixOmics', 'ropls'))
+
+library(extrafont)
+font_import()
+```
+
+
+
+## Font
+
+- Add repository for ttf-mscorefonts-installer 
+- Install ttf-mscorefonts-installer 
+- Import to R using extrafont
+
+## Administration
+
+Disconnected from the server
+https://docs.rstudio.com/shiny-server/
+
+https://stackoverflow.com/questions/39116782/disconnected-from-server-in-shinyapps-but-locals-working
+https://docs.rstudio.com/shiny-server/#sockjs_heartbeat_delay
+
+```
+Increase the value of 'sockjs_heartbeat_delay' in shiny-server.conf 
+```
+
+https://github.com/rstudio/shiny-server/pull/264
+
+```
+http_keepalive_timeout 220;
+sockjs_disconnect_delay 200;
+disable_websockets;
+```
+
+## Build a dynamic UI that reacts to user input
+
+http://shiny.rstudio-staging.com/articles/dynamic-ui.html#addingremoving-ui-with-insertui-and-removeui
+
+
+## options("repos") only changed to MRAN when scanForPackages = TRUE and there is a new package to install
+
+https://github.com/RevolutionAnalytics/checkpoint/issues/274
+
+```{r, eval=F}
+checkpoint::checkpoint("2019-03-13", scanForPackages = TRUE)
+
+# To change the CRAN mirror to MRAN mirror of specified date
+checkpoint::setSnapshot("2019-03-13")
+
+# Make sure that packages are loaded from checkpoint directory
+library(data.table, lib.loc = .libPaths()[1])
+```
+
+

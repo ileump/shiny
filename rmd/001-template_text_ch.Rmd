@@ -1,0 +1,293 @@
+---
+title: "数据分析报告"
+output:
+  word_document: default
+  reference_docx: template.docx
+bibliography: bibliography.bib
+params:
+  tmp_data: NA
+---
+
+```{r, echo=F, include=F}
+Sys.setlocale("LC_ALL","Chinese")
+```
+
+```{r, echo=F}
+knitr::read_chunk('report_chunk.R')
+```
+
+```{r 10_setup, echo=F}
+```
+
+```{r 20_load_data}
+```
+
+报告系统版本: `r my_options$version`
+
+## 数据转换
+
+```{r 30-write_summary_1, eval=F}
+```
+
+Yes/No表示该项数据转换是否执行。
+
+- [`r ifelse(input$preprocess_handle_missing, 'Yes', 'No')`] 替换缺失值 (0或者空缺)，替换为最小数的1/2
+- [`r ifelse(input$preprocess_log, 'Yes', 'No')`] 对数变换
+- [`r ifelse(input$preprocess_sd, 'Yes', 'No')`] 方差归一化
+
+数据摘要信息保存在summary1.csv。
+
+
+## 数据概要
+
+```{r 33-metabolites_statistics, fig.width=input$metabolites_statistics_width / input$dpi, fig.height=input$metabolites_statistics_height / input$dpi}
+
+```
+
+上面的柱状图表示了数据中不同种类的代谢物或脂质的个数。
+
+```{r 35-ome_summary, fig.width=input$ome_summary_width / input$dpi, fig.height=input$ome_summary_height / input$dpi}
+
+```
+
+上面的柱状图表示了各个分组中每一类代谢物或脂质的平均含量，每个分组用不同的颜色表示。
+
+```{r 36-ome_summary_text, results='asis'}
+
+```
+
+
+## 主成分分析（Principal Component Analysis, PCA）
+
+变量很多的数据集当中，通常很多的变量之间会有一定的相关性。因此可以通过一些线性转换获得能最大程度代表整体变化方向的维度，也就是主成分，从而降低数据的维度并能保留大部分原始数据的信息。主成分分析是一种常用的降维方法，通过找到一组互相不相关新变量来最大化表达原有数据的信息，让转换得到的数据更容易可视化和理解。主成分分析（PCA）也是代谢组学最常用的分析之一，可以从得分图看到不同样品之间的整体差异情况。比如可以观察不同的分组是否分开，具体在哪一个主成分上分开，还有同一组的样品的离散程度。如果有明显的离群值就值得我们特别的关注，可以查看原始数据或者利用热图找到这个样品的哪些代谢物含量过高或者过低。需要注意的是，仅通过统计分析的方法常常并不能完全准确的确定异常的样品，没有一个客观的阈值，还是需要研究者综合考虑。对各个主成分的贡献最大的代谢物也用柱状图呈现了出来，结合得分图我们可以大概了解样品在哪些代谢物的含量上有区别。
+
+```{r 40-pca_scree, fig.width=input$pca_scree_width / input$dpi, fig.height=input$pca_scree_height / input$dpi}
+```
+
+```{r 45-pca_scree_text, results='asis'}
+
+```
+
+`r sprintf('左上碎石图显示主成分解释X变量方差的比例。越靠前的主成分解释的比例会越高，然后会逐渐过渡到平滑的区间。选择关注的主成分的数量时，一般会保留图中有较大落差的部分，也就是图形平滑之前的部分，实际中常用的通常是前2-3个主成分。其它的载荷图显示了在每个主成分上的载荷最高的前%d个变量，载荷也称作贡献度，反映了变量和主成分之间的相关性。', input$pca_scree_top_n)`
+
+各主成分解释的方差的比例数值见PCA_eig.csv。各变量对各个主成分的贡献见PCA_contrib.csv。
+
+
+```{r 50-pca_ind, fig.width=input$pca_ind_width / input$dpi, fig.height=input$pca_ind_height / input$dpi, results='hide'}
+```
+
+上面是主成分得分图。X/Y轴上的百分比指的是该主成分解释的方差比例。
+
+样本在主成分维度上的坐标见PCA_ind.csv。
+
+主成分分析碎石图和得分图的矢量图保存在`r paste0(my_options$pca_scree_prefix, '.pdf')`和`r paste0(my_options$pca_ind_prefix, '.pdf')`当中。
+
+## 聚类和热图 (Clustering & Heatmap)
+
+除了主成分分析之外，组学研究中也经常用热图来观察样品的整体差异，也可以方便发现异常值。热图用两种颜色来表示代谢物的含量高低。由于不同的代谢物含量差异比较大，我们会先将所有的代谢物标准化，这样所有样品中该代谢物的平均值接近于0会呈现为白色，低于平均值会成为负值，而高于平均值则为正值，颜色越深代表离平均值的差距越大。热图右边的色条表示颜色对应的数值，数值的意义表示是距离平均值多少个标准差。对代谢物进行标准化之后，数值不再含有单位，只反映不同样品的相对大小，所以可以比较不同样品的同一个代谢物的含量，但是同一个样品中不同的代谢物含量不可以进行比较。
+
+```{r 60-heatmap, fig.width=input$heatmap_width / input$dpi, fig.height=input$heatmap_height / input$dpi, fig.cap = '', results='hide'}
+```
+
+```{r 65-heatmap_subplot, results='asis'}
+```
+
+热图的尺寸如果太大，在word文档里面不能很好的显示，可以查看`r paste0(my_options$heatmap_prefix, '.pdf')`中的矢量图。
+
+## 正交偏最小二乘判别分析 (Orthogonal Projection to Latent Structures Discriminant Analysis, OPLS-DA)
+
+主成分分析和聚类都是非监督学习，也就是建模的时候并没有利用分组的信息，而仅仅是利用代谢物的含量，只是在可视化的时候把不同的分组标注上去。非监督学习通常不能利用分组之间的差异将样品区分开。为了更好的区分不同的分组，就可以用监督学习的方法。而代谢组学研究中最常用的监督学习方法是正交偏最小二乘判别分析，也就是OPLS-DA。OPLS-DA和PLS-DA比较接近，PLS方法会找到许多和分组相关的成分，而OPLS[@Trygg2002]方法能够将X变量中与Y变量相关的信息集中在第一个主成分中，而其它的正交成分和Y无相关性，仅反映X中的内部结构。这样仅有一个成分用于预测，更容易理解和可视化。正交成分的个数的最优值是通过交叉验证得到，但有时正交成分并不显著，这时的模型就仅有一个预测成分，而没有正交成分。
+
+OPLS-DA得分图显示的是样本在预测成分（x轴）和正交成分（y轴）维度上的分布和分组的分布区间（Mahalanobis ellipse）。有的时候可能没有发现显著的正交成分，即正交成分的个数为0，就仅画出预测成分的得分图。
+
+R2X, R2Y分别是模型对X变量的解释性和Y变量的解释性，完全解释则数值为１。Q2Y是模型的预测性，最大值为１。解释性和预测性的区别在于，解释性反映了模型和建模数据的符合程度，而预测性反映了模型对于测试数据的预测能力，一般会更接近实际运用中对于未知样本的预测能力。合适的模型通常有比较高的R2Y和Q2Y的值。需要注意的是，对于不同的研究代谢组数据的模型表现可能会有区别，比如异质性高，表型和代谢相关性较弱的情况下，模型表现会比较差，建议参考同类型的研究来评估模型的表现。
+
+左上图表示的是随机置换Y以后得到的模型结果（用点表示）与原有模型结果（用两条水平线表示）的比较。P值是随机置换模型取得更高R2Y/Q2Y得分的比例。原有模型的R2Y和Q2Y如果明显好于随机置换后的结果，表明模型拟合得很好。如果研究样本量小于变量个数,或者随机置换的模型指标接近原有模型，容易有过拟合的问题，结果解读需谨慎。过拟合是一种由于模型纳入的变量特征过多，复杂程度过高，对于训练的数据集（通常样本量较小）分类结果非常好，但是对新的数据预测结果差的一种现象。
+
+异常值检测图会把距离样本分布区域中心较远的值标注出来，可能是潜在的异常值，可以考虑结合主成分分析、热图还有原始数据综合判断。最后的ROC图是通过预测成分与分组的比较得到的。ROC图中曲线下方的面积，即AUC（Area Under the Curve），是最常用的评价分类模型表现的指标，AUC越接近于1模型的表现越好。ROC图的X轴和Y轴分别表示的是模型的特异性和敏感性。ROC是一条曲线而不是一个单一的点，因为OPLS-DA模型对于一个样品的分类结果是一个连续的数,两个组分别在0的两边。通过选择不同的阈值可以得到不同的分类结果，对应一个特异性和敏感性的值，或者是ROC曲线上的一个点。一系列这样的点连在一起组成了ROC曲线。计算特异性和敏感性需要设定一个阴性组合一个阳性组，比如野生型或者健康对照一般会当做阴性组，对应的阴性组和阳性组见图下方的说明。需要注意的是，在样品数量比较少的时候，即使AUC很高可能并不具有实际意义，一个原因是样本可能不能代表现实中的个体差异。
+
+类似于主成分分析，不同的变量对于模型分类能力的贡献也是不一样的。在OPLS-DA分析中会得到所有代谢物的VIP值，通常VIP>1是一个代谢物可以考虑用作生物标记物的必要条件，VIP值越大则其重要性越高。OPLS-DA只能用在两组分类的情况下，不同的两组间的比较得到的VIP值也是不同的。
+
+总结起来，运用OPLS-DA模型的时候，先考虑研究的目的是否需要一个预测的模型，如果希望展示生物标记物的预测能力，OPLS-DA是一个常用的模型。模型的现实意义和普适性，依赖于有代表性的样本和足够大的样品数量。报告中的OPLS-DA结果解读，可以先看看得分图中的区分情况，注意R2Y和Q2Y的得分。重要的是要看置换实验中P值是否大于0.05，如果是，模型很有可能过度拟合，的区分结果和AUC可能会被高估（通常是样品数量过少）。
+
+```{r 70-oplsda, results='asis'}
+```
+
+```{r 75-oplsda_text, results='asis'}
+```
+
+OPLS模型的全部变量VIP得分保存在“VIP_分组１－分组２.csv”文件中.
+
+OPLS模型的矢量图保存在文件名前缀是`r my_options$oplsda_prefix`的文件中。
+
+## 假设检验 (Hypothesis Testing)
+
+|分组个数|是否配对|参数检验     |参数post-hoc检验|非参数检验|非参数post-hoc检验|
+|--------|------|-------------|----------------|----------------|------------------|
+|2　|配对　|paired t-test|                |Wilcoxon signed-rank test|
+|2　|不配对|t-test       |                |Mann-Whitney-U test|         |
+|>2　|不配对|Welch's ANOVA|Tukey's HSD/Games-Howell test|Kruskal-Wallis test|Dunn's test*[@Dunn1964]|
+
+`r if(input$padjust == 'none') { print('事后检验P值是初始P值。') } else { sprintf('事后检验P值是经过%s方法校正。', switch(input$padjust, holm = 'Holm', hochberg = 'Hochberg', bonferroni = 'Bonferroni', BH = 'Benjamini-Hochberg', BY = 'Benjamini-Yekutieli')) }`
+
+倍数变化(fold change)的计算在配对和不配对的情况下是不同的。配对的情况下，会得到所有配对之间的倍数变化的中位数。而在不配对的时候，会得到两组的平均数之间的倍数。
+
+```{r, results='asis'}
+if (input$pair_var != 'None') {
+    ## paired
+    cat('本研究为２个分组的配对样本，使用的假设检验是参数检验paired t-test和非参数检验Wilcoxon signed rank test。\n')
+} else if (nlevels(g_data$group) == 2) {
+    cat('本研究为２个分组的非配对独立样本，使用的假设检验是参数检验t-test和非参数检验Mann-Whitney U test。\n')
+} else if (nlevels(g_data$group) > 2) {
+    cat('本研究为大于２个分组的非配对独立样本，使用的假设检验是参数检验Welch\'s ANOVA 和非参数检验Kruskal-Wallis test。Post-hoc 检验是参数检验Tukey\'s HSD test，Games-Howell test和非参检验Dunn\'s test。\n')
+}
+
+if (input$padjust != 'none') {
+    cat(sprintf('Post-hoc 检验用%s方法校正。\n', input$padjust))
+} else {
+    cat('Post-hoc test P值没有校正。')
+}
+```
+
+假设检验的结果保存在"hypothesis_test.csv"。
+
+```{r 90-hypothesis_test, eval=F}
+if(!is.null(g_data$hypothesis_test))
+    write.csv(
+        g_data$hypothesis_test,
+        file = 'hypothesis_test.csv',
+        row.names = T
+    )
+```
+
+## 火山图 (Volcano plot)
+
+```{r 100-volcano, fig.width=input$volcano_width / input$dpi, fig.height=input$volcano_height / input$dpi}
+
+```
+
+```{r 105-volcano_text, results='asis'}
+```
+
+
+火山图同时展示代谢物的统计学显著程度（P value）和变化的幅度（fold change），能够帮助我们快速直观的发现那些既有统计学差异，也有相对较大的变化幅度的代谢物。倍数变化(fold change)的阈值并没有一个统一的标准，需要根据研究和数据的特点选择合适的值，从而筛选到需要重点关注的代谢物。
+
+```{r}
+msg <- paste0(
+  '倍数变化超过设定的阈值（大于1）有两种情况：大于该阈值或者小于其倒数。同时满足P值和倍数变化条件的代谢物会被标注出来。',
+  ifelse(input$volcano_max_label==0, '', paste0('为了避免过于密集的文字标注，图中最多只标注了满足P值和倍数变化条件的代谢物中，P值最小的', input$volcano_max_label, '个。')),
+  'P值采用%s检验结果。',
+  '火山图的标题表示了倍数变化计算时的分子和分母。'
+)
+```
+
+`r sprintf('倍数变化超过设定的阈值（大于1）有两种情况：大于该阈值或者小于其倒数。同时满足P值和倍数变化条件的代谢物会被标注出来。%sP值采用%s检验结果。火山图的标题表示了倍数变化计算时的分子和分母。', ifelse(input$volcano_max_label==0, '', paste0('为了避免过于密集的文字标注，图中最多只标注了满足P值和倍数变化条件的代谢物中，P值最小的', input$volcano_max_label, '个。')), input$volcano_p)`
+
+
+火山图的矢量图保存在`r paste0(my_options$volcano_prefix, '.pdf')`当中。
+
+## 显著差异代谢物图
+
+显著差异代谢物图中展示了P值最小的代谢物的倍数变化和P值。 柱状图横坐标表示log2(fold change)，上调为正值而下调为负值。
+
+
+```{r 108-differential_metabolites_text, results='asis'}
+```
+
+## 箱形图 (Boxplot)
+
+```{r 110-boxplot, fig.width=input$boxplot_width / input$dpi, fig.height=input$boxplot_height / input$dpi}
+
+```
+
+```{r 105-boxplot_text, results='asis'}
+
+```
+
+```{r}
+## %s 后面不可以是中文的标点
+msg <- paste0(
+  sprintf(
+  '上面是前%d个最显著的代谢物的箱型图。P值是根据%s',
+  input$boxplot_top_n,
+  switch(
+    input$boxplot_posthoc,
+    TukeyHSD = "Tukey HSD test",
+    `Games-Howell` = "Games-Howell test",
+    Dunn = "Dunn's test",
+    Parametric = ifelse(
+      input$pair_var == 'None',
+      't-test',
+      'paired t-test'
+    ),
+    `Non-parametric` = ifelse(
+      input$pair_var == 'None',
+      'Mann-Whitney U test',
+      'Wilcoxon signed rank test'
+    )
+  )), '。',
+  '可以在hypothesis_test.csv文件中查看全部的假设检验结果。',
+  ifelse(
+    nlevels(g_data$group) > 2,
+    '在多于2个组别的情况下，用字母来表示组间比较的显著性。没有同样字母的两个组之间有显著差异（P<0.05），有相同字母的两个组之间没有显著差异（P>0.05)。',
+    ''
+  ),
+  '全部的箱形图保存在', paste0(my_options$boxplot_prefix, '.pdf'), '。'
+)
+```
+
+
+`r msg` 
+
+## 柱状图 (Barplot)
+
+```{r 120-barplot, fig.width=input$barplot_width / input$dpi, fig.height=input$barplot_height / input$dpi}
+
+```
+
+```{r, 125-barplot_text, results='asis'}
+
+```
+
+```{r}
+## %s 后面不可以是中文的标点
+msg <- paste0(
+  sprintf(
+  '上面是前%d个最显著的代谢物的柱状图。P值是根据%s',
+  input$barplot_top_n,
+  switch(
+    input$barplot_posthoc,
+    TukeyHSD = "Tukey HSD test",
+    `Games-Howell` = "Games-Howell test",
+    Dunn = "Dunn's test",
+    Parametric = ifelse(
+      input$pair_var == 'None',
+      't-test',
+      'paired t-test'
+    ),
+    `Non-parametric` = ifelse(
+      input$pair_var == 'None',
+      'Mann-Whitney U test',
+      'Wilcoxon signed rank test'
+    )
+  )), '。',
+  '误差线表示的是', ifelse(input$barplot_ci == '0.68', '1', '1.96'), '个标准误差，', 
+  '对应', sprintf('%.0f%%', as.numeric(input$barplot_ci) * 100), '置信区间。',
+  '可以在hypothesis_test.csv文件中查看全部的假设检验结果。',
+  ifelse(
+    nlevels(g_data$group) > 2,
+    '在多于2个组别的情况下，用字母来表示组间比较的显著性。没有同样字母的两个组之间有显著差异（P<0.05），有相同字母的两个组之间没有显著差异（P>0.05)。',
+    ''
+  ),
+  '全部的箱形图保存在', paste0(my_options$barplot_prefix, '.pdf'), '。'
+)
+```
+
+
+`r msg`
+
+
+```{r 130-sessionInfo}
+```
+
+## 参考文献

@@ -1,0 +1,184 @@
+---
+title: "Statistical report"
+output:
+  word_document: default
+bibliography: bibliography.bib
+params:
+  tmp_data: NA
+---
+
+```{r, echo=F, include=F}
+Sys.setlocale("LC_ALL","English")
+```
+
+```{r, echo=F}
+knitr::read_chunk('report_chunk.R')
+```
+
+```{r 10_setup, echo=F}
+```
+
+```{r 20_load_data}
+```
+
+Reporting engine version: `r my_options$version`
+
+## Data transformation
+
+```{r 30-write_summary_1}
+```
+
+- [`r ifelse(input$preprocess_handle_missing, 'Yes', 'No')`] Replace missing values (0 or blank) by half of global minimum
+- [`r ifelse(input$preprocess_log, 'Yes', 'No')`] Log transformation
+- [`r ifelse(input$preprocess_sd, 'Yes', 'No')`] Unit variance normalization
+
+Summary of data file is saved to summary1.csv.
+
+## Metabolites Statistics
+
+```{r 35-metabolites_statistics, fig.width=input$metabolites_statistics_width / input$dpi, fig.height=input$metabolites_statistics_height / input$dpi}
+
+```
+
+## Principal Component Analysis
+
+In high-dimensional data analysis, it is common that many variables are correlated. So it is possible to reduce its dimension without losing much information.  Principal component analysis (PCA) is a widely used dimension reduction method that identity a small new set of independent variables that best represent the information of the original data, so that the transformed data is easier to visualize and interpret.
+
+```{r 40-pca_scree, fig.width=input$pca_scree_width / input$dpi, fig.height=input$pca_scree_height / input$dpi}
+```
+
+`r sprintf('The top-left panel is scree plot which shows percentage variance explained by each component. The rest shows the top %d variables that have the highest contribution to each principal component.', input$pca_scree_top_n)`
+
+Refer to PCA_eig.csv for explained variance by each component. Refer to PCA_contrib.csv for percentage contribution to each component by each variable.
+
+```{r 50-pca_ind, fig.width=input$pca_ind_width / input$dpi, fig.height=input$pca_ind_height / input$dpi}
+
+```
+
+PCA score plot. The percentage in axis label indicates how much variance in X can be explained by that component.
+
+Refer to PCA_ind.csv for the coordinates of each sample.
+
+Vector images of PCA scree plot and score plot can be found in`r paste0(my_options$pca_scree_prefix, '.pdf')` and `r paste0(my_options$pca_ind_prefix, '.pdf')`.
+
+## Clustering & Heatmap
+
+**Parameters**
+
+- Rotated [`r ifelse(input$heatmap_rotate, 'Yes', 'No')`]
+- Scaled on [`r input$heatmap_scale`]
+
+```{r 60-heatmap, fig.width=input$heatmap_width / input$dpi, fig.height=input$heatmap_height / input$dpi}
+
+```
+
+If the size of heatmap is too big to display properly here in this word document, find the vector image in `r paste0(my_options$heatmap_prefix, '.pdf')`.
+
+## Orthogonal Projection to Latent Structures Discriminant Analysis (OPLS-DA)
+
+OPLS[@Trygg2002] removes variations from X that is uncorrelated to Y. In mathematical terms this is equivalent to removing systematic variations that is orthogonal to Y. Only one predictive component is produced, making it easy to visualize and interpret. The optimal number of orthogonal components is determined automatically with cross-validation. Sometimes, 0 orthogonal component is obtained, then the model only has 1 predictive component.
+
+OPLS-DA score plot shows sample score in predictive component (X axis) and orthogonal component (Y axis) and Mahalanobis ellipse of each group. When the number of orthogonal component is 0, only predictive component is shown.
+
+R2X, R2Y are percentage of explained variance in X and Y. Q2Y is the measure of predictive performance of the full model.
+
+Top-left panel shows the significance of the model by comparing with models built after permutation of Y values. The two horizontal lines indicate R2Y and Q2Y of the full model and other points indicate R2Y and Q2Y of permuted models. P value is determined as the proportion of permuted models scored better in R2Y/Q2Y than the full model. If the model is well fitted we should see the full model scores much better than permuted models. If the sample size is less than number of variables or scores of permuted models are very close to the full model, we should be concerned about possible model over-fitting. 
+
+Observation diagnostic plot shows potential outliers that locate far from group centers which are labeled.
+
+Last, ROC plot is obtained from comparison of class labels and the predictive component scores.
+
+
+```{r 70-oplsda, results='asis'}
+
+```
+
+
+VIP score of OPLS is saved as "VIP_group1-group2.csv".
+
+Vector images of OPLS is saved as "oplsda_group1-group2.pdf".
+
+## Hypothesis testing
+
+|#Groups|Matched/paired|Parametric test     |Parametric post-hoc test |Non-parametric test|Non parametric post-hoc test|
+|--------|------|-------------|----------------|----------------|------------------|
+|2　|Yes　|paired t-test|                |Signed rank test|
+|2　|No|t-test       |                |Mann-Whitney-U test|         |
+|>2　|No |Welch's ANOVA|Tukey's HSD/Games-Howell test|Kruskal-Wallis test|Dunn's test*[@Dunn1964]|
+
+*P value of Dunn's test is the FDR is controlled using the Benjamini-Hochberg adjustment.
+
+`r if(input$padjust == 'none') { print('Raw P values are presented for post-hoc tests.') } else { sprintf('Post-hoc test P values were adjusted using %s procedure.', switch(input$padjust, holm = 'Holm', hochberg = 'Hochberg', bonferroni = 'Bonferroni', BH = 'Benjamini-Hochberg', BY = 'Benjamini-Yekutieli')) }`
+
+Fold change is calculated differently when the study is paired or non-paired. It is calculated as the median of pair-wise fold change when the study is paired, or fold change of group means when the study is not paired.
+
+```{r, results='asis'}
+if (input$pair_var != 'None') {
+    ## paired
+    cat('This study is paired and has 2 groups. Paired t-test (parametric) and signed rank test (non-parametric) were performed.')
+} else if (nlevels(g_data$group) == 2) {
+    cat('This study is non-paired and has 2 groups. T-test (parametric) and Man-Whitney-U test were performed.')
+} else if (nlevels(g_data$group) > 2) {
+    cat('This study is non-paired and has more than 2 groups. Welch\'s ANOVA (parametric) and Kruskal-Wallis test were performed. Parametric post-hoc test Tukey\'s HSD test and Games-Howell test were performed. Non-parametric post-hoc test Dunn\'s test was performed.')
+    
+}
+
+if (input$padjust != 'none') {
+    cat(sprintf('Post-hoc P values were adjusted by %s method.\n', input$padjust))
+} else {
+    cat('Post-hoc P values were not adjusted.')
+}
+```
+
+Hypothesis test result is saved as [hypothesis_test.csv].
+
+```{r 90-hypothesis_test}
+
+```
+
+## Volcano plot
+
+
+
+```{r 100-volcano, fig.width=input$volcano_width / input$dpi, fig.height=input$volcano_height / input$dpi}
+
+```
+
+A volcano plot represents statistical significance from a hypothesis test together with the magnitude of changes (fold change), facilitating quick visual identification of those metabolites that have large magnitude changes and are also statistically significant. There is no universal cut-off value for fold change (FC) and it can vary among different data sets. 
+
+`r sprintf('Fold change cut-off was applied on two sides, either larger than the cut-off value or smaller than its inverse. Metabolites with P values and fold change meeting respective cut-off condition are labeled%s. P values are derived from %s. Numerator and denominator of fold change calculattion is indicated in the plot title.', ifelse(input$volcano_max_label==0, '', paste0('，to avoid over-crowding of text labels, among all the metabolites that meet P value and fold change requirement, at most the top ', input$volcano_max_label, ' most significant ones are labeled.')), input$volcano_p)`
+
+Vector images of volcano plot is saved to volcano.pdf.
+
+## Boxplot
+
+```{r 110-boxplot, fig.width=input$boxplot_width / input$dpi, fig.height=input$boxplot_height / input$dpi}
+
+```
+
+`r sprintf('Boxplot of top %d most significant species. P values are derived from %s.', input$boxplot_top_n, input$boxplot_posthoc)`
+
+All pairwise comparison results are indicated by a letter-based representation as described in [@Piepho2004]. Groups that share the same letter are not significantly different at 0.05 level.
+
+Boxplot of all the species are saved to `r paste0(my_options$boxplot_prefix, '.pdf')`.
+
+## Barplot
+
+```{r 120-barplot, fig.width=input$barplot_width / input$dpi, fig.height=input$barplot_height / input$dpi}
+
+```
+
+`r sprintf('barplot of top %d most significant species. P values are derived from %s.', input$barplot_top_n, input$barplot_posthoc)`
+
+Error bars represent 1 standard error, or `r sprintf('%.0f%%', as.numeric(input$barplot_ci) * 100)` confidence interval.
+
+All pairwise comparison results are indicated by a letter-based representation as described in [@Piepho2004]. Groups that share the same letter are not significantly different at 0.05 level.
+
+Boxplot of all the species are saved to `r paste0(my_options$barplot_prefix, '.pdf')`.
+
+
+```{r 130-sessionInfo}
+
+```
+
+## Reference
